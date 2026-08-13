@@ -1,18 +1,18 @@
 #!/usr/bin/env node
-// 解析官方 freebuff 源 → 生成 models.json（供 GitHub Releases 兜底）
-// 用法: node scripts/build-freebuff-models-json.mjs [输出路径]
-// 默认输出: freebuff-models.json（仓库根目录）
+// Parse official freebuff source → generate models.json (for GitHub Releases fallback)
+// Usage: node scripts/build-freebuff-models-json.mjs [output path]
+// Default output: freebuff-models.json (repo root)
 //
-// 生成的 JSON 结构：
+// Generated JSON structure:
 // {
-//   "generatedAt": "ISO 时间",
+//   "generatedAt": "ISO timestamp",
 //   "source": "CodebuffAI/freebuff main",
-//   "models": [{ id, session, agent, upstream }, ...],   // 动态模型表
+//   "models": [{ id, session, agent, upstream }, ...],   // Dynamic model table
 //   "pools": { "premium": [...], "glm": [...], "standard": [...] }
 // }
 //
-// 注意：本脚本是 GitHub Actions 用的独立解析器，
-// 与 worker.js 内的解析逻辑保持一致（同一个真源）。
+// Note: This script is a standalone parser for GitHub Actions,
+// kept in sync with the parser logic in worker.js (same true source).
 
 import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 
-// 与 worker.js 相同的 3 个源（raw 主源 + jsDelivr 备用）
+// Same 3 sources as worker.js (raw primary + jsDelivr fallback)
 const SOURCES = {
   agents: [
     "https://raw.githubusercontent.com/CodebuffAI/freebuff/main/common/src/constants/free-agents.ts",
@@ -37,7 +37,7 @@ const SOURCES = {
   ],
 };
 
-// ---- 解析器（与 worker.js 保持一致）----
+// ---- Parser (kept in sync with worker.js) ----
 
 function parseModelIdConstants(source) {
   const table = {};
@@ -137,7 +137,7 @@ function parseModelPools(source, modelIdConstants) {
   return { premium: [...premium], glm: [...glm] };
 }
 
-// ---- 拉取 ----
+// ---- Fetch ----
 
 async function fetchFirst(urls) {
   for (const url of urls) {
@@ -155,7 +155,7 @@ async function fetchFirst(urls) {
   return null;
 }
 
-// ---- 主流程 ----
+// ---- Main flow ----
 
 async function main() {
   const outPath = process.argv[2] || join(REPO_ROOT, "freebuff-models.json");
@@ -165,7 +165,7 @@ async function main() {
     fetchFirst(SOURCES.stableIds),
   ]);
   if (!agentsSrc || !modelsSrc) {
-    console.error("❌ 拉取官方源失败（agents 或 models 为空），不生成 JSON");
+    console.error("❌ Failed to fetch official sources (agents or models empty), not generating JSON");
     process.exit(1);
   }
   try {
@@ -175,7 +175,7 @@ async function main() {
     };
     const agentMappings = parseAgentMappings(agentsSrc, modelIdConstants);
     if (Object.keys(agentMappings.root).length === 0) {
-      console.error("❌ 解析 agent 映射为空，不生成 JSON");
+      console.error("❌ Parsed agent mapping is empty, not generating JSON");
       process.exit(1);
     }
     const pools = parseModelPools(modelsSrc, modelIdConstants);
@@ -204,39 +204,39 @@ async function main() {
       },
     };
     writeFileSync(outPath, JSON.stringify(payload, null, 2) + "\n");
-    console.log(`✅ 生成 ${outPath}`);
-    console.log(`   模型数: ${models.length}`);
+    console.log(`✅ Generated ${outPath}`);
+    console.log(`   Models: ${models.length}`);
 
-    // ---- 同时生成 MODELS.md（北京时间，Premium 优先） ----
+    // ---- Also generate MODELS.md (Beijing time, Premium first) ----
     const mdPath = join(REPO_ROOT, "MODELS.md");
     const beijingTime = new Date().toLocaleString("sv-SE", { timeZone: "Asia/Shanghai", hour12: false }).replace(" ", " ");
     const knownNames = {
-      "deepseek/deepseek-v4-flash":   "DeepSeek V4 Flash（推理模型，代码/数学/推理优秀）",
-      "deepseek/deepseek-v4-pro":     "DeepSeek V4 Pro（最强推理模型）",
-      "minimax/minimax-m3":           "MiniMax M3（综合能力强，中文优秀）",
-      "mimo/mimo-v2.5":               "MiMo V2.5（轻量高效，适合快速任务）",
-      "openai/gpt-5.6-luna":          "GPT-5.6 Luna（OpenAI 最新，推理顶尖）",
-      "z-ai/glm-5.2":                 "GLM 5.2（智谱 AI，推荐解锁后使用）",
-      "poolside/laguna-s-2.1":        "Laguna S 2.1（Poolside 代码专用模型）",
-      "openrouter/poolside/laguna-s-2.1": "Laguna S 2.1（OpenRouter 通道）",
-      "inclusionai/ling-3.0-flash:free": "Ling 3.0 Flash（免费模型，响应快）",
-      "crof/greg-2-ultra":            "Greg 2 Ultra（CROF 旗舰模型）",
-      "crof/greg-2-super":            "Greg 2 Super（CROF 高性能模型）",
-      "anthropic/claude-fable-5":     "Claude Fable 5（Anthropic 限量模型）",
-      "meta/muse-spark-1.2-contributor": "Muse Spark 1.2（Meta 开发者专属，限量）",
-      "crof/kimi-k3-eco":            "Kimi K3 Eco（CROF 平衡型模型）",
+      "deepseek/deepseek-v4-flash":   "DeepSeek V4 Flash (reasoning, excellent at code/math/reasoning)",
+      "deepseek/deepseek-v4-pro":     "DeepSeek V4 Pro (strongest reasoning)",
+      "minimax/minimax-m3":           "MiniMax M3 (strong overall, good at Chinese)",
+      "mimo/mimo-v2.5":               "MiMo V2.5 (lightweight, efficient, quick tasks)",
+      "openai/gpt-5.6-luna":          "GPT-5.6 Luna (OpenAI latest, top-tier reasoning)",
+      "z-ai/glm-5.2":                 "GLM 5.2 (Zhipu AI, recommended after unlocking)",
+      "poolside/laguna-s-2.1":        "Laguna S 2.1 (Poolside code-specialized model)",
+      "openrouter/poolside/laguna-s-2.1": "Laguna S 2.1 (OpenRouter channel)",
+      "inclusionai/ling-3.0-flash:free": "Ling 3.0 Flash (free model, fast response)",
+      "crof/greg-2-ultra":            "Greg 2 Ultra (CROF flagship)",
+      "crof/greg-2-super":            "Greg 2 Super (CROF high-performance)",
+      "anthropic/claude-fable-5":     "Claude Fable 5 (Anthropic limited model)",
+      "meta/muse-spark-1.2-contributor": "Muse Spark 1.2 (Meta dev exclusive, limited)",
+      "crof/kimi-k3-eco":            "Kimi K3 Eco (CROF balanced model)",
     };
     const mdLines = [
-      `# Freebuff 可用模型（${beijingTime} 北京时间）`,
+      `# Freebuff Available Models (${beijingTime} Beijing time)`,
       "",
-      `> 自动生成 · 来源：[CodebuffAI/freebuff](https://github.com/CodebuffAI/freebuff) main · 更新频率：每 6 小时`,
+      `> Auto-generated · Source:[CodebuffAI/freebuff](https://github.com/CodebuffAI/freebuff) main · Updated every 6 hours`,
       "",
     ];
-    // 按 pool 分组：premium 优先，然后 standard，最后 glm
+    // Group by pool: premium first, then standard, then glm
     const sections = [
-      { title: "会员（Premium）模型", ids: [...premium].sort() },
-      { title: "标准（STANDARD）模型", ids: standard.sort() },
-      { title: "独立池（GLM 推荐解锁）", ids: [...glm].sort() },
+      { title: "Premium Models", ids: [...premium].sort() },
+      { title: "Standard Models", ids: standard.sort() },
+      { title: "Independent Pool (GLM - Unlock Recommended)", ids: [...glm].sort() },
     ];
     for (const sec of sections) {
       mdLines.push(`## ${sec.title}`, "");
@@ -246,11 +246,11 @@ async function main() {
       }
       mdLines.push("");
     }
-    mdLines.push(`---`, `共 ${models.length} 个模型 · 上次更新：${beijingTime}`, "");
+    mdLines.push(`---`, `${models.length} models · Last updated: ${beijingTime}`, "");
     writeFileSync(mdPath, mdLines.join("\n"));
-    console.log(`✅ 生成 ${mdPath}`);
+    console.log(`✅ Generated ${mdPath}`);
   } catch (e) {
-    console.error("❌ 解析失败:", e.message);
+    console.error("❌ Parse failed:", e.message);
     process.exit(1);
   }
 }

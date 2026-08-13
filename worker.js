@@ -4,15 +4,15 @@ const DEFAULT_API_KEY = "freebuff-default-key";
 const VERSION = "1.8.9";
 const CONTEXT_PRUNER_AGENT = "context-pruner";
 
-// 动态模型注册表：从官方 freebuff 镜像拉取模型清单
-// 真源: https://github.com/CodebuffAI/freebuff (freebuff-private 的 public 镜像)
-// 与 Freebuff Desktop 0.0.51 orchestrator.js 的 FREEBUFF_ROOT_AGENT_ID_BY_MODEL 同源
-// （镜像常量 = 桌面版同源源码，安装包只是编译产物）
-// 需要 3 个源（常量分散定义）：
-//   1. free-agents.ts       → FREEBUFF_ROOT_AGENT_ID_BY_MODEL（模型→agent 映射）
-//   2. freebuff-models.ts   → 大部分模型 ID 常量 + 池定义（PREMIUM/GLM）
-//   3. freebuff-model-ids.ts→ deepseek/m3 等 ID 常量（被 models.ts re-export）
-// 每源都有 raw 主源 + jsDelivr 备用
+// Dynamic model registry: fetches model list from the official freebuff mirror
+// True source: https://github.com/CodebuffAI/freebuff (public mirror of freebuff-private)
+// Same origin as Freebuff Desktop 0.0.51 orchestrator.js FREEBUFF_ROOT_AGENT_ID_BY_MODEL
+// (mirror constants = same source as desktop; the installer is just a compiled artifact)
+// Requires 3 sources (constants spread across files):
+//   1. free-agents.ts       → FREEBUFF_ROOT_AGENT_ID_BY_MODEL（model→agent mapping）
+//   2. freebuff-models.ts   → most model ID constants + pool definitions (PREMIUM/GLM)
+//   3. freebuff-model-ids.ts→ deepseek/m3 ID constants (re-exported by models.ts)
+// Each source has a raw primary + jsDelivr fallback
 const DYNAMIC_MODELS_SOURCES = [
   "https://raw.githubusercontent.com/CodebuffAI/freebuff/main/common/src/constants/free-agents.ts",
   "https://cdn.jsdelivr.net/gh/CodebuffAI/freebuff@main/common/src/constants/free-agents.ts",
@@ -25,34 +25,34 @@ const DYNAMIC_MODELS_STABLE_IDS_SOURCES = [
   "https://raw.githubusercontent.com/CodebuffAI/freebuff/main/common/src/constants/freebuff-model-ids.ts",
   "https://cdn.jsdelivr.net/gh/CodebuffAI/freebuff@main/common/src/constants/freebuff-model-ids.ts",
 ];
-// Releases 兜底源：GitHub Actions 每天生成的解析好的 JSON（无需解析，直接可用）
-// 当官方 3 个源全部失败/解析失败时使用。比 raw.githubusercontent 更稳（GitHub CDN）。
-// 已实测（2026-08-11）：releases/latest/download 地址 HTTP 200，内容正确。
+// Releases fallback: pre-parsed JSON generated daily by GitHub Actions (no parsing needed)
+// Used when all 3 official sources fail to fetch/parse. More stable than raw.githubusercontent (GitHub CDN).
+// Tested (2026-08-11): releases/latest/download URL returns HTTP 200, content is correct.
 const DYNAMIC_MODELS_RELEASE_SOURCES = [
   "https://github.com/pingmike2/freebuff2api-wokers/releases/latest/download/freebuff-models.json",
 ];
-// 刷新间隔：与 Quorinex 对齐，6 小时。失败时回退到硬编码 MODELS。
+// Refresh interval: aligned with Quorinex, 6 hours. Falls back to hardcoded MODELS on failure.
 const DYNAMIC_MODELS_REFRESH_MS = 6 * 60 * 60 * 1000;
 const DYNAMIC_MODELS_FETCH_TIMEOUT_MS = 10000;
 
-// 运行时动态模型缓存（内存，无 KV）
+// Runtime dynamic model cache (in-memory, no KV store)
 let dynamicModelsCache = {
   fetchedAt: 0,
-  models: null, // 动态模型表（含分类）
+  models: null, // Dynamic model table (with categories)
   pool: null, // { premium: Set, standard: Set, glm: Set }
 };
 
-// 解析 freebuff-models.ts 的模型 ID 常量
-// 形如:
+// Parse model ID constants from freebuff-models.ts
+// Format:
 //   export const FREEBUFF_MIMO_V25_MODEL_ID = mimoModels.mimoV25
 //   export const FREEBUFF_MINIMAX_M3_MODEL_ID = 'minimax/minimax-m3'
-// 兼容: 'string' | 标识符.成员（取成员名查 knownDefaults）| 标识符
+// Compatible with: 'string' | identifier.member (extract member name, look up in knownDefaults) | identifier
 function parseModelIdConstants(source) {
   const table = {};
   const knownDefaults = {
     mimoV25: "mimo/mimo-v2.5",
   };
-  // 匹配 export const NAME = 'value' 或 export const NAME = expr
+  // Match export const NAME = 'value' or export const NAME = expr
   const re = /export\s+const\s+([A-Z0-9_]+)\s*=\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z0-9_.]+))/g;
   let m;
   while ((m = re.exec(source)) !== null) {
@@ -61,7 +61,7 @@ function parseModelIdConstants(source) {
     const expr = m[4] ?? "";
     if (lit) table[name] = lit;
     else if (expr) {
-      // 标识符.成员 → 取成员名（mimoModels.mimoV25 → mimoV25）
+      // identifier.member → extract member name (mimoModels.mimoV25 → mimoV25)
       const member = expr.includes(".") ? expr.split(".").pop() : expr;
       if (knownDefaults[member]) table[name] = knownDefaults[member];
       else if (/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(expr)) table[name] = expr;
@@ -70,8 +70,8 @@ function parseModelIdConstants(source) {
   return table;
 }
 
-// 解析 free-agents.ts 中按用途分开的 agent 映射。
-// 不把 base2 root、base3 root、reviewer 混为一张表：它们属于不同运行路径。
+// Parse agent mappings from free-agents.ts, separated by purpose.
+// Do not merge base2 root, base3 root, and reviewer into one table: they belong to different execution paths.
 function parseAgentMappings(source, modelIdConstants) {
   const blockNames = {
     root: "FREEBUFF_ROOT_AGENT_ID_BY_MODEL",
@@ -94,18 +94,18 @@ function parseAgentMappings(source, modelIdConstants) {
   return result;
 }
 
-// 兼容旧调用方：默认返回普通 base2 root 映射。
+// Compatible with: 'string' | identifier.member (extract member name, look up in knownDefaults) | identifier
 function parseAgentMapping(source, modelIdConstants) {
   return parseAgentMappings(source, modelIdConstants).root;
 }
 
-// 解析 freebuff-models.ts 的池定义（PREMIUM / GLM；STANDARD 由 non-premium 推导）
-// FREEBUFF_WEB_PREMIUM_MODEL_IDS 含 spread（...FREEBUFF_PREMIUM_MODEL_IDS）
+// Parse pool definitions from freebuff-models.ts (PREMIUM / GLM; STANDARD derived from non-premium)
+// FREEBUFF_WEB_PREMIUM_MODEL_IDS includes spread(...FREEBUFF_PREMIUM_MODEL_IDS)
 function parseModelPools(source, modelIdConstants) {
   const premium = new Set();
   const glm = new Set();
   const used = new Set();
-  // 展开 spread: ...FOO → FOO 里的条目（常量名 → 值）
+  // Expand spread: ...FOO → entries in FOO (constant name → value)
   const constValues = new Map();
   const constListRe = /export\s+const\s+([A-Z0-9_]+)\s*=\s*\[([^\]]*)\]\s*as\s*const/g;
   let cm;
@@ -124,7 +124,7 @@ function parseModelPools(source, modelIdConstants) {
     }
     constValues.set(name, items);
   }
-  // 解析池
+  // Parse pools
   const poolRe = /export\s+const\s+(FREEBUFF_WEB_PREMIUM_MODEL_IDS|FREEBUFF_GLM_V52_MODEL_IDS|FREEBUFF_PREMIUM_MODEL_IDS)\s*=\s*\[([^\]]*)\]/g;
   let pm;
   while ((pm = poolRe.exec(source)) !== null) {
@@ -137,7 +137,7 @@ function parseModelPools(source, modelIdConstants) {
       const lit = im[2] ?? im[3];
       const expr = im[4];
       if (spread) {
-        // 递归展开 spread 常量
+        // Recursively expand spread constant
         const expand = (n) => {
           const entries = constValues.get(n) || [];
           for (const [kind, val] of entries) {
@@ -155,20 +155,20 @@ function parseModelPools(source, modelIdConstants) {
       for (const id of items) premium.add(id);
     }
   }
-  // FREEBUFF_PREMIUM_MODEL_IDS 与 FREEBUFF_WEB_PREMIUM_MODEL_IDS 都算 premium
+  // Both FREEBUFF_PREMIUM_MODEL_IDS and FREEBUFF_WEB_PREMIUM_MODEL_IDS count as premium
   return { premium: [...premium], glm: [...glm] };
 }
 
-// 动态模型表：分别记录普通 root、base3 root、reviewer。
+// Dynamic model table: records root, base3 root, and reviewer separately.
 function buildDynamicModelTable(agentMappings) {
-  // 兼容旧调用：传入单张 root mapping 时仍可正常构建。
+  // Compatible with: 'string' | identifier.member (extract member name, look up in knownDefaults) | identifier
   const mappings = agentMappings && agentMappings.root
     ? agentMappings
     : { root: agentMappings || {}, base3: {}, reviewer: {} };
   return Object.entries(mappings.root).map(([modelId, rootAgent]) => ({
     id: modelId,
     session: modelId,
-    // 旧字段保留为普通 root，普通 chat 永远使用它。
+    // Old field kept as regular root; normal chat always uses it.
     agent: rootAgent,
     root_agent: rootAgent,
     base3_agent: mappings.base3[modelId] || null,
@@ -177,7 +177,7 @@ function buildDynamicModelTable(agentMappings) {
   }));
 }
 
-// 合并硬编码与动态表：硬编码优先（不覆盖），动态新增追加
+// Merge hardcoded and dynamic tables: hardcoded takes priority (no overwrite), new dynamic entries appended
 function mergeModelTables(hardcoded, dynamic) {
   const seen = new Set(hardcoded.map((m) => m.id));
   const merged = [...hardcoded];
@@ -190,7 +190,7 @@ function mergeModelTables(hardcoded, dynamic) {
   return merged;
 }
 
-// 拉取并刷新动态模型缓存（失败静默回退）
+// Fetch and refresh dynamic model cache (silently falls back on failure)
 async function fetchSourceList(urls) {
   for (const url of urls) {
     try {
@@ -200,8 +200,8 @@ async function fetchSourceList(urls) {
       clearTimeout(timer);
       if (resp.ok) {
         const text = await resp.text();
-        // 阈值放宽：freebuff-model-ids.ts 只有 ~491B（3 个常量），
-        // 500 阈值会误杀。只过滤真正的空文件（<100B）。
+        // Relaxed threshold: freebuff-model-ids.ts is only ~491B (3 constants),
+        // a 500-byte threshold would falsely reject it. Only filter truly empty files (<100B).
         if (text && text.length > 100) return text;
       }
     } catch {}
@@ -214,28 +214,28 @@ async function refreshDynamicModelsIfStale() {
   if (dynamicModelsCache.models && now - dynamicModelsCache.fetchedAt < DYNAMIC_MODELS_REFRESH_MS) {
     return dynamicModelsCache;
   }
-  // 并行拉 3 个源（每源主 raw + 备 jsDelivr）
+  // Fetch 3 sources in parallel (primary raw + jsDelivr fallback per source)
   const [agentsSrc, modelsSrc, stableIdsSrc] = await Promise.all([
     fetchSourceList(DYNAMIC_MODELS_SOURCES),
     fetchSourceList(DYNAMIC_MODELS_MODEL_IDS_SOURCES),
     fetchSourceList(DYNAMIC_MODELS_STABLE_IDS_SOURCES),
   ]);
   if (!agentsSrc || !modelsSrc) {
-    // 官方源拉取失败：尝试 Releases JSON 兜底
+    // Official sources failed: try Releases JSON fallback
     const release = await tryReleaseFallback();
     if (release) {
       dynamicModelsCache = release;
       return dynamicModelsCache;
     }
-    // Releases 也失败：保留旧缓存（若有），否则维持现状
+    // Releases also failed: keep old cache (if any), otherwise maintain current state
     return dynamicModelsCache;
   }
   try {
-    // 合并常量表：models.ts 优先（完整），stableIds.ts 补充 deepseek/m3
+    // Merge constant tables: models.ts takes priority (complete), stableIds.ts supplements deepseek/m3
     const modelIdConstants = { ...parseModelIdConstants(stableIdsSrc || ""), ...parseModelIdConstants(modelsSrc) };
     const agentMappings = parseAgentMappings(agentsSrc, modelIdConstants);
     if (Object.keys(agentMappings.root).length === 0) {
-      // 解析失败：尝试 Releases 兜底
+      // Parse failed: try Releases fallback
       const release = await tryReleaseFallback();
       if (release) {
         dynamicModelsCache = release;
@@ -254,18 +254,18 @@ async function refreshDynamicModelsIfStale() {
       },
     };
   } catch {
-    // 解析崩溃：尝试 Releases 兜底
+    // Parse crashed: try Releases fallback
     const release = await tryReleaseFallback();
     if (release) {
       dynamicModelsCache = release;
       return dynamicModelsCache;
     }
-    // 保留旧缓存
+    // Keep old cache
   }
   return dynamicModelsCache;
 }
 
-// Releases JSON 兜底：直接拉预生成的 models.json，零解析成本
+// Releases JSON fallback: directly fetch pre-generated models.json, zero parsing cost
 async function tryReleaseFallback() {
   for (const url of DYNAMIC_MODELS_RELEASE_SOURCES) {
     try {
@@ -292,7 +292,7 @@ async function tryReleaseFallback() {
   return null;
 }
 
-// 动态 STANDARD = 动态表里不在 premium/glm 池的模型
+// Dynamic STANDARD = models in the dynamic table that are NOT in premium/glm pools
 function dynamicStandardModels() {
   const cache = dynamicModelsCache;
   if (!cache || !cache.models || !cache.pool) return new Set();
@@ -301,8 +301,8 @@ function dynamicStandardModels() {
   return new Set(cache.models.map((m) => m.id).filter((id) => !premium.has(id) && !glm.has(id)));
 }
 
-// 模型池分类查询：动态池优先，硬编码兜底
-// 返回 "premium" | "standard" | "glm" | null
+// Model pool category lookup: dynamic pool first, hardcoded fallback
+// Returns "premium" | "standard" | "glm" | null
 function modelPoolCategory(modelId) {
   const dyn = dynamicModelsCache;
   if (dyn && dyn.pool) {
@@ -310,46 +310,46 @@ function modelPoolCategory(modelId) {
     if (dyn.pool.glm.has(modelId)) return "glm";
     if (dynamicStandardModels().has(modelId)) return "standard";
   }
-  // 硬编码兜底
+  // Hardcoded fallback
   if (PREMIUM_QUOTA_MODELS.has(modelId)) return "premium";
   if (STANDARD_MODELS.has(modelId)) return "standard";
   return null;
 }
 
 
-// 模型 → session 用模型名 / 上游 agentId / 上游 chat 模型名
-// 只保留 1 个硬编码兜底（极端情况下至少有一个可用）：
-//   - mimo/mimo-v2.5   STANDARD 模型
-// 其余模型全部由动态拉取提供（官方源 → GitHub Releases JSON → 这个兜底）
+// model → session model name / upstream agentId / upstream chat model name
+// Only keep 1 hardcoded fallback (at least one available in extreme cases):
+//   - mimo/mimo-v2.5   STANDARD model
+// All other models are provided by dynamic fetch (official source → GitHub Releases JSON → this fallback)
 const MODELS = [
   { id: "mimo/mimo-v2.5", session: "mimo/mimo-v2.5", agent: "base2-free-mimo", upstream: "mimo/mimo-v2.5" },
 ];
 
 // ---------------------------------------------------------------------------
-// 额度池说明（逆向自官方源码 freebuff-models.ts，2026-08-10 实证）
+// Quota pool notes (reverse-engineered from official freebuff-models.ts, verified 2026-08-10)
 //
-// 官方三种额度池（都是 session 次数，非 token 数）：
-//   1. PREMIUM 池：共享 6 次/天（FREEBUFF_PREMIUM_SESSION_LIMIT=6）
-//      m3 / v4-pro / luna / laguna-s-2.1 / muse-spark / greg-2 等
+// Three official quota pools (all session counts, not token counts):
+//   1. PREMIUM pool: shared 6/day (FREEBUFF_PREMIUM_SESSION_LIMIT=6)
+//      m3 / v4-pro / luna / laguna-s-2.1 / muse-spark / greg-2 
 //      （FREEBUFF_WEB_PREMIUM_MODEL_IDS）
-//   2. STANDARD 池：浏览器/Web 端 6 次/天
-//      （FREEBUFF_WEB_STANDARD_SESSION_LIMIT=6；= 所有非 premium 模型，
-//      即 Flash / MiMo 2.5 等。FREEBUFF_WEB_STANDARD_MODEL_IDS）
-//      ⚠️ 注释原文："The CLI keeps these models UNLIMITED; browser surfaces
+//   2. STANDARD pool: browser/Web 6/day
+//      (FREEBUFF_WEB_STANDARD_SESSION_LIMIT=6; = all non-premium models,
+//       i.e. Flash / MiMo 2.5. FREEBUFF_WEB_STANDARD_MODEL_IDS)
+//      ⚠️ Source comment: "The CLI keeps these models UNLIMITED; browser surfaces
 //      cap fresh sessions to deter automated project/session churn."
-//      → CLI 协议 Flash 无限，但 CLI 已被官方封堵（free_mode_cli_required）；
-//        桌面版/Web 协议下 Flash 同样受 6 次/天限制
-//   3. GLM 5.2 池：独立，referral 解锁（不计入以上）
+//      → CLI protocol Flash is unlimited, but CLI has been blocked by upstream (free_mode_cli_required);
+//        Flash is also limited to 6/day under desktop/Web protocol
+//   3. GLM 5.2 pool: independent, referral-unlocked (not counted above)
 //
-// 桌面版并发桶（FREEBUFF_DESKTOP_SESSION_LIMITS，仅限并发非额度）：
-//   premium:  1  ← Premium 模型每用户同时 1 个活跃 session
-//   unlimited: 3 ← Flash/MiMo 每用户最多 3 个并发 tab
-//   limited 访问层（无 Premium 的号）：所有模型都占 1 个 slot
+// Desktop concurrency buckets (FREEBUFF_DESKTOP_SESSION_LIMITS, concurrency only, not quota):
+//   premium: 1 ← Premium models: 1 active session per user at a time
+//   unlimited: 3 ← Flash/MiMo: max 3 concurrent tabs per user
+//   limited access tier (no Premium): all models occupy 1 slot
 //   （occupiesFreebuffDesktopSlot / getFreebuffDesktopSessionBucket）
 //
-// 对 1.7.0 的意义：单号串行时每天上限 = Premium 6 + Flash 6（07:00 UTC
-// 太平洋日重置）。并发到多号会同时烧各号额度，无法靠并发突破 6 次/天。
-// 额度池只用于选号，绝不改变调用方请求的模型。
+// For v1.7.0: single-account serial daily limit = Premium 6 + Flash 6 (07:00 UTC
+// Pacific day reset). Spreading across multiple accounts burns each account's quota simultaneously — concurrency cannot bypass the 6/day limit.
+// Quota pool is only used for account selection; it never changes the caller's requested model.
 // ---------------------------------------------------------------------------
 const PREMIUM_QUOTA_MODELS = new Set([
   "deepseek/deepseek-v4-pro",
@@ -363,12 +363,12 @@ const STANDARD_MODELS = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
-// 桌面版协议常量（逆向自 Freebuff Desktop orchestrator.js）
-// 桌面版 = multi-session 模式（每 tab 一个实例），与 CLI 单会话区分。
-// ⚠️ 实测（2026-08-10）：multi-session 创建的实例 chat 报 428 waiting_room_required
-// （服务端 chat gate 不识别多会话实例），因此 POST 实际用单会话但保留
-// 预生成 instance-id 的桌面版签名。include-unused-rate-limits 是浏览器/
-// 模型选择器用的额度快照头，GET 探测时带它没问题。
+// Desktop protocol constants (reverse-engineered from Freebuff Desktop orchestrator.js)
+// Desktop = multi-session mode (one instance per tab), distinct from CLI single-session.
+// ⚠️ Tested (2026-08-10): multi-session instances return 428 waiting_room_required on chat
+// (server chat gate does not recognize multi-session instances), so POST actually uses single-session but retains
+// pre-generated instance-id desktop signature. include-unused-rate-limits is the browser/
+// quota snapshot header used by the model selector — safe to include in GET probes.
 // ---------------------------------------------------------------------------
 const DESKTOP_INCLUDE_RATE_LIMITS = { "x-freebuff-include-unused-rate-limits": "1" };
 
@@ -378,11 +378,11 @@ export default {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
 
-    // healthz 不鉴权：健康检查/监控探针不应依赖 API key
+    // healthz does not require auth: health checks/monitoring probes should not depend on API key
     if (request.method === "GET" && url.pathname === "/healthz") {
-      // 健康检查只读 Worker 最近一次真实请求形成的本地快照。
-      // 不因为公开探针访问就向上游 fan-out GET /session 和 /me；这类请求
-      // 会产生额外行为，也可能干扰同一账号正在进行的会话。
+      // Health check reads the local snapshot from the Worker's most recent real request.
+      // Do not fan-out GET /session and /me upstream just because of a public probe; these requests
+      // produce extra behavior and may interfere with an ongoing session on the same account.
       return jsonResponse({
         status: "ok",
         version: VERSION,
@@ -422,17 +422,17 @@ export default {
 };
 
 // ---------------------------------------------------------------------------
-// 账号池
+// Account pool
 // ---------------------------------------------------------------------------
 
 let accountIdx = 0;
-const cooldowns = new Map();      // token -> 冷却到期 ms
-const sessCache = new Map();      // `${token}:${sessionModel}` -> { instanceId, model, remainingMs, expiresAt }（必须带 token，多账号防串号）
+const cooldowns = new Map();      // token -> cooldown expiry ms
+const sessCache = new Map();      // `${token}`:${sessionModel}` -> { instanceId, model, remainingMs, expiresAt } (token-prefixed to prevent cross-account mixing)
 
 
 function parseAccounts(env) {
-  // 支持一行一个（换行）或逗号分隔；每项可为纯 token 或 "token:uid"（冒号配对 user_id）
-  // 例："t1\nt2:u2\nt3,u4:u4" → [{token:t1,uid:null},{token:t2,uid:u2},...]
+  // Supports one per line (newline) or comma-separated; each entry can be a plain token or "token:uid" (colon-separated user_id)
+  // e.g. "t1\nt2:u2\nt3,u4:u4" → [{token:t1,uid:null},{token:t2,uid:u2},...]
   return (env.FREEBUFF_TOKEN || "").split(/[\n,]/)
     .map((s) => s.trim())
     .filter((s) => s.length > 8)
@@ -445,14 +445,14 @@ function parseAccounts(env) {
 }
 
 // ---------------------------------------------------------------------------
-// 账号健康探测（v1.6.0）：GET /api/v1/me 不消耗 session/额度，探测 token 有效性并自动发现 uid
+// Account health probe (v1.6.0): GET /api/v1/me does not consume session/quota, probes token validity and auto-discovers uid
 // ---------------------------------------------------------------------------
 
 const acctHealth = new Map(); // token -> { alive, state, uid, quota, checkedAt }
 const HEALTH_OBSERVATION_TTL_MS = 10 * 60 * 1000;
 
-// 只记录真实业务请求已经观察到的上游结果。不要在 healthz 中主动探测，
-// 也不要把网络错误/未知响应误记成账号失效。
+// Only record upstream results observed by real business requests. Do not proactively probe in healthz,
+// and do not mistake network errors/unknown responses as account failures.
 function recordAccountObservation(token, status, dataOrText, extra = {}) {
   if (!token) return;
   let data = dataOrText;
@@ -523,22 +523,22 @@ function pickToken(env, sessionModel) {
   const pool = parseAccounts(env);
   if (pool.length === 0) return null;
 
-  // v1.6.0：跳过已探测为失效的号（alive=false）；未探测/探测失败的不跳过（避免误杀）
+  // v1.6.0: skip accounts probed as dead (alive=false); do not skip unprobed/failed probes (avoid false positives)
   const alivePool = pool.filter((acct) => {
     const h = acctHealth.get(acct.token);
     return !(h && h.alive === false);
   });
-  const usePool = alivePool.length > 0 ? alivePool : pool; // 全失效时回退全池，让请求继续（由 429 冷却接管）
+  const usePool = alivePool.length > 0 ? alivePool : pool; // fall back to full pool when all dead; let 429 cooldown handle it
 
-  // v1.8.5.1：账号选择恢复为稳定轮询。
-  // rateLimitsByModel 仅作为观测数据，不参与轮询顺序；真实 session/chat
-  // 返回明确限流后，再通过 cooldown 跳过该账号。这样不会因为旧快照
-  // 抢占轮询，也不会把账号顺序重排成“剩余额度最多优先”。
+  // v1.8.5.1: account selection restored to stable round-robin.
+  // rateLimitsByModel is observation-only, does not affect round-robin order; real session/chat
+  // only triggers cooldown skip after receiving explicit rate limits. This prevents stale snapshots from
+  // hijacking the round-robin or reordering accounts by "most remaining quota first".
   const finalPool = usePool;
 
-  // 优先复用已有活跃 session 缓存的号：一个 session 约 1 小时有效，创建 session 才扣
-  // 免费额度（如 v4-pro 每天 6 次）。纯轮询会让每个请求都切号、各建一个 session，
-  // 浪费创建额度。只要当前模型的 session 缓存还活跃就钉在同一个号上，用满再换。
+  // Prefer accounts with active session caches: a session lasts ~1 hour, quota is deducted only on session creation
+  // Free quota (e.g., v4-pro 6/day). Pure round-robin would switch accounts and create a session per request,
+  // wasting session creation quota. Stick to the same account while the session cache is active; switch only when exhausted.
   if (sessionModel) {
     for (const acct of finalPool) {
       const t = acct.token;
@@ -550,7 +550,7 @@ function pickToken(env, sessionModel) {
     }
   }
 
-  // 没有活跃缓存才轮询（跳过冷却中的号）
+  // Only round-robin when no active cache exists (skip cooldown accounts)
   for (let k = 0; k < finalPool.length; k++) {
     const acct = finalPool[accountIdx % finalPool.length];
     accountIdx = (accountIdx + 1) % finalPool.length;
@@ -621,7 +621,7 @@ function isStaleSessionGate(status, body) {
     status === expectedStatus && hasExactErrorCode(parsed, code));
 }
 
-// 仅供流式无首数据时确认 Premium 额度是否耗尽；不参与账号轮询排序。
+// Only used to confirm Premium quota exhaustion when streaming has no initial data; does not affect account round-robin ordering.
 function remainingQuota(token, sessionModel) {
   if (modelPoolCategory(sessionModel) === "standard") return null;
   const h = acctHealth.get(token);
@@ -642,13 +642,13 @@ function remainingQuota(token, sessionModel) {
   return entry.limit - entry.recentCount;
 }
 
-// 长流不应因为固定秒数被误杀：只有上游额度探测明确表示不可用时，
-// 才允许当前请求中止并切换账号。探测失败/额度未知一律不判定耗尽。
+// Long streams should not be killed by a fixed timeout: only when upstream quota probing explicitly indicates exhaustion,
+// allow the current request to abort and switch accounts. Failed probes or unknown quota never trigger exhaustion.
 function isQuotaExhausted(info, sessionModel) {
   if (!info) return false;
   if (["rate_limited", "banned", "country_blocked", "token_invalid", "blocked", "model_locked", "ip_capped"].includes(info.state)) return true;
-  // STANDARD 没有可靠的剩余次数查询；只处理明确的账号/上游状态，
-  // 不根据 rateLimitsByModel 的 STANDARD 数字判断耗尽。
+  // STANDARD has no reliable remaining quota query; only handle explicit account/upstream states,
+  // do not determine exhaustion from STANDARD rateLimitsByModel numbers.
   if (modelPoolCategory(sessionModel) === "standard") return false;
   if (!info.quota) return false;
   let entry = info.quota[sessionModel];
@@ -665,7 +665,7 @@ function isQuotaExhausted(info, sessionModel) {
 }
 
 function parseCooldown(text, status) {
-  // 优先解析 JSON 里的 retryAfterMs（luna 等模型 429 返回 {"retryAfterMs": 15506639}）
+  // Prefer retryAfterMs from JSON response (luna models return {"retryAfterMs": 15506639} on 429)
   const jm = (text || "").match(/"retryAfterMs"\s*:\s*(\d+)/);
   if (jm) {
     const ms = parseInt(jm[1], 10);
@@ -711,11 +711,11 @@ async function deleteUpstreamSession(token, instanceId) {
 }
 
 // ---------------------------------------------------------------------------
-// 上游请求（串行队列，免费通道并发超过 1 就出问题）
+// Upstream requests (serial queue; free-tier concurrency >1 causes issues)
 // ---------------------------------------------------------------------------
 
 let chainTail = Promise.resolve();
-const CHAIN_GAP_MS = 300; // 上游免费通道并发 >1 会出问题，串行+小间隔；300ms 足够防抖且链路总耗时可控
+const CHAIN_GAP_MS = 300; // free-tier concurrency >1 causes issues; serial + gap; 300ms debounce keeps total latency manageable
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function enqueue(fn) {
@@ -724,16 +724,16 @@ function enqueue(fn) {
   return run;
 }
 
-const UPSTREAM_TIMEOUT_MS = 20000; // 上游单请求超时，避免客户端干等
-const NONSTREAM_TIMEOUT_MS = 45000; // 非流式要聚合完整上游流（含推理），给更充裕时间
-const SESSION_TIMEOUT_MS = 10000;  // session/run 等短交互更快失败
-// 这不是流式请求的失败时间，只是首个数据迟迟未到时启动一次额度探测的观察窗口。
-// 额度仍在时不 abort、不切号，继续等待上游。
+const UPSTREAM_TIMEOUT_MS = 20000; // upstream single-request timeout, prevents client from waiting indefinitely
+const NONSTREAM_TIMEOUT_MS = 45000; // non-streaming needs to aggregate full upstream stream (including reasoning), gives more time
+const SESSION_TIMEOUT_MS = 10000;  // session/run short interactions fail faster
+// Not a streaming request failure timeout — only an observation window for triggering a quota probe when the first data is delayed.
+// Do not abort or switch accounts while quota is still available; keep waiting for upstream.
 const STREAM_NO_DATA_PROBE_DELAY_MS = 20000;
 
 async function up(method, path, token, body, extraHeaders = {}, timeoutMs = UPSTREAM_TIMEOUT_MS) {
   const headers = {};
-  // 桌面版协议：不手动设置 User-Agent（fetch 默认），只带必要的业务头
+  // Desktop protocol: do not manually set User-Agent (fetch default), only carry necessary business headers
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   Object.assign(headers, extraHeaders);
@@ -754,12 +754,12 @@ function enqueueUp(method, path, token, body, extraHeaders, timeoutMs) {
   return enqueue(() => up(method, path, token, body, extraHeaders, timeoutMs));
 }
 
-// 流式无首数据时的额度检查：只读本地缓存，绝不打上游。
-// ⚠️ 不能在这里 GET /api/v1/freebuff/session 强制刷新：
-// 该接口会占用账号 session，而 freebuff 一个号同一时间只能一个客户端在线，
-// 探测会顶掉正在推理的会话（428 waiting_room_required）。luna effort=high
-// 等长推理模型首 token 可能 >20s，此时探测必然误伤。
-// 缓存缺失/过期/额度未知 → 一律不判定耗尽，继续等待上游。
+// Quota check when streaming has no initial data: read-only local cache, never hit upstream.
+// ⚠️ Cannot force-refresh here via GET /api/v1/freebuff/session:
+// This endpoint would occupy the account session, and Freebuff only allows one client online per account at a time,
+// Probing would disrupt an ongoing inference session (428 waiting_room_required). luna effort=high
+// Long-reasoning models may take >20s for the first token — probing would be a false positive.
+// Cache miss/expired/quota unknown → never declare exhaustion, keep waiting for upstream.
 async function freshQuotaProbe(token, sessionModel) {
   const cached = acctHealth.get(token);
   if (!cached) return;
@@ -767,8 +767,8 @@ async function freshQuotaProbe(token, sessionModel) {
   if (isQuotaExhausted(cached, sessionModel)) throw new QuotaExhaustedError(cached);
 }
 
-// 流式 chat 不设置总时长 abort。只有在首个数据迟迟未到时，
-// 才强制刷新账号额度；额度未知或仍有额度时，原请求继续等待。
+// Streaming chat does not set a total timeout abort. Only when the first data is delayed,
+// force-refresh account quota; if quota is unknown or still available, the original request keeps waiting.
 async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
   const controller = new AbortController();
   const request = fetch(url, { ...init, signal: controller.signal });
@@ -788,7 +788,7 @@ async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
     probeTimer = null;
   };
   try {
-    // 首个字节前不再使用 AbortSignal.timeout(20s)。
+    // No longer use AbortSignal.timeout(20s) before the first byte.
     const response = await Promise.race([request, armProbe()]);
     clearProbe();
     if (!response.body) throw new EmptyUpstreamStreamError();
@@ -801,7 +801,7 @@ async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
       throw new EmptyUpstreamStreamError();
     }
 
-    // 首个 chunk 已到达，交还给正常 SSE 转发逻辑；不再设置固定总时长。
+    // First chunk has arrived; hand off to normal SSE forwarding logic; no more fixed total timeout.
     const body = new ReadableStream({
       start(streamController) {
         streamController.enqueue(first.value);
@@ -831,20 +831,20 @@ async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
 }
 
 // ---------------------------------------------------------------------------
-// session 生命周期
+// Session lifecycle
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// 正常客户端行为层（v1.8.8.1，源码依据：官方 cli/src/hooks/use-gravity-ad.ts、
+// Normal client behavior layer (v1.8.8.1, based on: official cli/src/hooks/use-gravity-ad.ts,
 // cli/src/utils/fingerprint.ts、sdk/src/impl/llm.ts）
-//   - 稳定指纹：每个 Worker（账号）一个永不变化的 fingerprintId（enhanced- 前缀，
-//     官方用硬件序列号/MAC/机器ID 哈希；CF 无硬件，用 token 派生稳定哈希即可，
-//     关键是"同一账号永远同一指纹"）
-//   - 广告链：官方免费推理靠广告（源码注释原话），每次会话前 POST /ads 拉取 +
-//     POST /ads/impression 上报曝光，失败静默
-//   - usage 触碰：官方客户端启动会查 /api/v1/usage，补上让调用面更完整
+//   - Stable fingerprint: one never-changing fingerprintId per Worker/account (enhanced- prefix,
+//     Official uses hardware serial/MAC/machine ID hash; CF has no hardware, derive stable hash from token,
+//     key principle: "same account always has the same fingerprint"）
+//   - Ad chain: official free inference is ad-supported (source comment), POST /ads before each session +
+//     POST /ads/impression for impression reporting, silently skipped on failure
+//   - Usage touch: the official client queries /api/v1/usage at startup — do the same for completeness
 // ---------------------------------------------------------------------------
-const BEHAVIOR_CACHE_TTL_MS = 30 * 60 * 1000; // 30 分钟
+const BEHAVIOR_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const behaviorCache = new Map(); // key -> ts
 
 function behaviorDue(key) {
@@ -856,8 +856,8 @@ function behaviorDue(key) {
   return false;
 }
 
-// 稳定指纹：token 派生，同一账号永远一致（官方 enhanced- 前缀 + 哈希）
-// CF Workers 无同步 WebCrypto，用轻量确定性哈希（FNV-1a 双种子 + hex）
+// Stable fingerprint: derived from token, always consistent per account (official enhanced- prefix + hash)
+// CF Workers lack synchronous WebCrypto, use lightweight deterministic hash (FNV-1a dual seed + hex)
 function stableFingerprint(token) {
   let h1 = 0x811c9dc5, h2 = 0x01000193;
   const s = "freebuff-fp-v2:" + token;
@@ -869,12 +869,12 @@ function stableFingerprint(token) {
   return "enhanced-" + h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
 }
 
-// 广告链：POST /ads 拉取 → 若有 impUrl 则 POST /ads/impression 上报曝光。
-// 官方实现：getCliAdRequestUserAgent 发 Freebuff-CLI/<version> UA；
-// body {provider:"gravity", surface, sessionId, device, userAgent}；曝光 {impUrl, mode}
+// Ad chain: POST /ads to fetch → if impUrl exists, POST /ads/impression for impression reporting.
+// Official implementation: getCliAdRequestUserAgent sends Freebuff-CLI/<version> UA;
+// body {provider:"gravity", surface, sessionId, device, userAgent}; impression {impUrl, mode}
 async function runNormalClientBehavior(token, clientFingerprint) {
   const failures = [];
-  // 1) 广告拉取 + 曝光（每 30 分钟一次，避免每个请求都打广告接口）
+  // 1) Ad fetch + impression (every 30 min, avoid hitting ad API per request)
   if (behaviorDue("ads:" + token)) {
     try {
       const ad = await enqueueUp("POST", "/api/v1/ads", token, {
@@ -892,7 +892,7 @@ async function runNormalClientBehavior(token, clientFingerprint) {
       }
     } catch (e) { failures.push("ads:" + String(e && e.message || e).slice(0, 80)); }
   }
-  // 2) usage 触碰（30 分钟一次）
+  // 2) Usage touch (every 30 min)
   if (behaviorDue("usage:" + token)) {
     try {
       await enqueueUp("POST", "/api/v1/usage", token,
@@ -904,9 +904,9 @@ async function runNormalClientBehavior(token, clientFingerprint) {
 }
 
 async function createSession(token, sessionModel, forceCreate = false) {
-  // 0) 正常客户端行为：广告链 + usage 触碰（30 分钟节流，失败静默）
+  // 0) Normal client behavior: ad chain + usage touch (30-minute throttle, silent failure)
   try { await runNormalClientBehavior(token, stableFingerprint(token)); } catch {}
-  // 1) 缓存命中且未过期（剩 >60s）直接复用，避免每次请求都打上游 session 接口
+  // 1) Cache hit and not expired (>60s remaining): reuse directly to avoid hitting upstream session API per request
   if (!forceCreate) {
     const cached = sessCache.get(token + ":" + sessionModel);
     if (isUsableSession(cached)) {
@@ -914,9 +914,9 @@ async function createSession(token, sessionModel, forceCreate = false) {
     }
     if (cached) sessCache.delete(token + ":" + sessionModel);
   }
-  // 1) 查上游当前 session，同模型直接复用（forceCreate 时跳过：僵尸 active session 会被 GET 反复复用，
-  //    导致 chat 一直 428；强制 POST 拿全新实例）
-  //    桌面版签名：GET 带 include-unused-rate-limits（模型选择器额度快照头）
+  // 1) Check upstream current session, reuse if same model (skip on forceCreate: zombie active sessions get repeatedly reused by GET,
+  //    causing persistent 428 on chat; force POST for a fresh instance)
+  //    Desktop signature: GET with include-unused-rate-limits (model selector quota snapshot header)
   if (!forceCreate) {
     const cur = await enqueueUp("GET", "/api/v1/freebuff/session", token, undefined,
       DESKTOP_INCLUDE_RATE_LIMITS, SESSION_TIMEOUT_MS);
@@ -937,10 +937,10 @@ async function createSession(token, sessionModel, forceCreate = false) {
   }
 
 
-  // 2) create（可能 queue）。桌面版签名：POST 带预生成 x-freebuff-instance-id（客户端 UUID）。
-  //    ⚠️ 实测（2026-08-10）：multi-session:1 创建的实例 chat 报 428 waiting_room_required
-  //    （服务端 chat gate 不识别多会话实例），所以这里用单会话 + 预生成 instance-id：
-  //    既保留桌面版客户端预生成实例的指纹，又确保 chat 能被识别。
+  // 2) create (may queue). Desktop signature: POST with pre-generated x-freebuff-instance-id (client UUID).
+  //    ⚠️ Tested (2026-08-10): multi-session:1 instances return 428 waiting_room_required on chat
+  //    (server chat gate does not recognize multi-session instances), so we use single-session + pre-generated instance-id:
+  //    retains the desktop client pre-generated instance fingerprint while ensuring chat is recognized.
   const instId = crypto.randomUUID();
   const r = await enqueueUp("POST", "/api/v1/freebuff/session", token, undefined,
     { "x-freebuff-model": sessionModel, "x-freebuff-instance-id": instId, "Content-Type": "application/json" }, SESSION_TIMEOUT_MS);
@@ -972,12 +972,12 @@ async function createSession(token, sessionModel, forceCreate = false) {
     }
     throw new Error("session stayed queued (retry later)");
   }
-  if (r.status === 409) throw new Error("session_model_mismatch: " + String(r.data?.message || r.data?.error || "上游拒绝该模型"));
+  if (r.status === 409) throw new Error("session_model_mismatch: " + String(r.data?.message || r.data?.error || "upstream rejected this model"));
   throw new Error("create session failed: " + r.status + " " + (r.text || "").slice(0, 300));
 }
 
 // ---------------------------------------------------------------------------
-// agent-runs 生命周期
+// Agent-runs lifecycle
 // ---------------------------------------------------------------------------
 
 function utcNow() {
@@ -1001,11 +1001,11 @@ async function finishRun(token, runId, totalSteps) {
     { action: "FINISH", runId, status: "completed", totalSteps, directCredits: 0, totalCredits: 0 }, undefined, SESSION_TIMEOUT_MS);
 }
 
-// deepseek 等直接模型：主 run + context-pruner 子 run
-// 精简版：只 START 两个 run（chat 只校验 run_id 存在，recordStep/finishRun 可跳过），
-// 实测链路总耗时 4s 内（原版 8s），满足 qwenpaw check_model_connection 5s 超时
+// Direct models (deepseek, etc.): main run + context-pruner sub-run
+// Simplified: only START two runs (chat only validates run_id existence; recordStep/finishRun can be skipped),
+// Measured total chain latency under 4s (original 8s), meeting qwenpaw check_model_connection 5s timeout
 const runCache = new Map();   // `${token}:${agentId}` -> { runId, childRunId, ts }
-const RUN_CACHE_TTL_MS = 10 * 60 * 1000; // 实测 run_id 可跨请求复用（上游只校验存在性），10min 缓存省两次上游调用
+const RUN_CACHE_TTL_MS = 10 * 60 * 1000; // run_id is reusable across requests (upstream only validates existence); 10min cache saves two upstream calls
 
 async function startRunChain(token, agentId) {
   const key = token + ":" + agentId;
@@ -1021,7 +1021,7 @@ async function startRunChain(token, agentId) {
 }
 
 // ---------------------------------------------------------------------------
-// 上游 payload 构造（对齐 py 版 build_upstream_payload）
+// Upstream payload construction (aligned with Python build_upstream_payload)
 // ---------------------------------------------------------------------------
 
 const UPSTREAM_KEYS = [
@@ -1031,9 +1031,9 @@ const UPSTREAM_KEYS = [
   "temperature", "tool_choice", "tools", "top_logprobs", "top_p", "top_k", "user",
 ];
 
-// 官方 free-mode marker 要求系统提示必须以 "You are Buffy, the strategic coding assistant."
-// 字节级开头（服务端 hasFreebuffRootSystemPromptOpening 检查，旧 `[System Override...]`
-// 前缀绕过已被官方修补并返回 403 free_mode_cli_required）。
+// Official free-mode marker requires system prompt to start with "You are Buffy, the strategic coding assistant."
+// byte-level opening (server hasFreebuffRootSystemPromptOpening check; the old `[System Override...]`
+// prefix bypass has been patched by upstream, returning 403 free_mode_cli_required).
 const BUFFY = "You are Buffy, the strategic coding assistant.";
 
 function normalizeMessages(messages) {
@@ -1047,8 +1047,8 @@ function normalizeMessages(messages) {
     if (item.role === "system") {
       hasSystem = true;
       item.cache_control = { type: "ephemeral" };
-      // 注入官方 Buffy 前缀（服务器 hasFreebuffRootSystemPromptOpening 字节级校验）。
-      // 字符串和数组(content 为 [{type:'text',text}]，OpenAI SDK 常见)都要处理。
+      // Inject the official Buffy prefix (server hasFreebuffRootSystemPromptOpening byte-level check).
+      // Both string and array (content as [{type:'text',text}], common in OpenAI SDK) must be handled.
       if (typeof item.content === "string") {
         if (!item.content.startsWith(BUFFY)) item.content = BUFFY + item.content;
       } else if (Array.isArray(item.content)) {
@@ -1062,19 +1062,19 @@ function normalizeMessages(messages) {
   return out;
 }
 
-// 官方模型 reasoning effort 上限表（2026-08-12 源码：freebuff-models.ts / reasoning-effort.ts）
-// 模型只允许其 efforts 数组中的档位；请求档位超出上限时 clamp-down 到最近可用档，
-// 不拒绝请求、不换模型（官方 clampReasoningEffort 语义）。
-// 档位升序 ladder：minimal < low < medium < high < xhigh < max < ultra
+// Official model reasoning effort limits (2026-08-12 source: freebuff-models.ts / reasoning-effort.ts)
+// Models only allow effort levels in their efforts array; when the requested level exceeds the limit, clamp down to the nearest available level,
+// without rejecting the request or switching models (official clampReasoningEffort semantics).
+// Effort level ascending ladder: minimal < low < medium < high < xhigh < max < ultra
 const REASONING_EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
-// 官方 per-model efforts：
-//   - deepseek-v4-flash: [low, high, max]（无 medium）
+// Official per-model efforts:
+//   - deepseek-v4-flash: [low, high, max] (no medium)
 //   - deepseek-v4-pro:   [high, max]
 //   - gpt-5.6-luna:      EFFORTS_THROUGH_MAX（low..max）
 //   - muse-spark:        EFFORTS_THROUGH_XHIGH（low..xhigh，ALWAYS reasons，none=400）
-//   - minimax-m3:        无 effort（官方 adaptive/disabled thinking，不设档位）
-//   - 未列出的模型：无限制，原样透传
+//   - minimax-m3:        no effort (official adaptive/disabled thinking, no levels set)
+//   - Unlisted models: no limits, pass through as-is
 const MODEL_EFFORTS = {
   "deepseek/deepseek-v4-flash": ["low", "high", "max"],
   "deepseek/deepseek-v4-pro": ["high", "max"],
@@ -1085,7 +1085,7 @@ const MODEL_EFFORTS = {
 function clampReasoningEffort(requested, allowed) {
   if (!Array.isArray(allowed) || allowed.length === 0) return requested;
   const wanted = REASONING_EFFORT_RANK.indexOf(requested);
-  if (wanted < 0) return requested; // 未知档位 → 原样透传，交由上游
+  if (wanted < 0) return requested; // Unknown level → pass through as-is, let upstream handle it
   let best = null;
   let bestRank = -1;
   for (const cand of allowed) {
@@ -1094,7 +1094,7 @@ function clampReasoningEffort(requested, allowed) {
     if (rank > bestRank) { best = cand; bestRank = rank; }
   }
   if (best !== null) return best;
-  // 所有可用档都高于请求 → 取最低档（官方语义）
+  // All available levels are higher than requested → pick the lowest (official semantics)
   return allowed.reduce((lo, c) =>
     REASONING_EFFORT_RANK.indexOf(c) < REASONING_EFFORT_RANK.indexOf(lo) ? c : lo);
 }
@@ -1102,7 +1102,7 @@ function clampReasoningEffort(requested, allowed) {
 function normalizeReasoningEffort(model, effort) {
   if (effort === undefined || effort === null) return effort;
   const allowed = MODEL_EFFORTS[model];
-  if (!allowed) return effort; // 模型未列 → 不干预
+  if (!allowed) return effort; // Model not listed → no intervention
   const clamped = clampReasoningEffort(String(effort), allowed);
   return clamped === String(effort) ? effort : clamped;
 }
@@ -1110,7 +1110,7 @@ function normalizeReasoningEffort(model, effort) {
 function buildUpstreamPayload(params, mc, sess, runId) {
   const payload = {};
   for (const k of UPSTREAM_KEYS) if (params[k] !== undefined && params[k] !== null) payload[k] = params[k];
-  // reasoning_effort 按官方模型 efforts 表 clamp-down（不拒绝、不换模型）
+  // reasoning_effort clamped per official model efforts table (no rejection, no model switch)
   if (payload.reasoning_effort !== undefined) {
     payload.reasoning_effort = normalizeReasoningEffort(mc.id, payload.reasoning_effort);
   }
@@ -1119,10 +1119,10 @@ function buildUpstreamPayload(params, mc, sess, runId) {
   payload.stream = true;
   if (!payload.stop) payload.stop = ['"cb_easp"'];
   payload.provider = { data_collection: "deny" };
-  // 工具集签名：Freebuff 对「带 tools 但无官方专属工具名」的请求会判定为
-  // foreign_toolset 并拒绝/降级模型（表现为工具调用被限制）。end_turn 是官方
-  // TOOLS_WHICH_WONT_FORCE_NEXT_STEP 白名单里的无害工具，混入它能让带工具的
-  // 请求通过校验；end_turn 不会被模型实际调用，只用于工具集合签名。
+  // Toolset signature: Freebuff rejects requests with tools but no official tool names as
+  // foreign_toolset and refuses/downgrades the model (tool calls get restricted). end_turn is an official
+  // harmless tool in the TOOLS_WHICH_WONT_FORCE_NEXT_STEP whitelist; mixing it in allows tool-bearing
+  // requests to pass validation; end_turn is never actually called by the model, it only serves as a toolset signature.
   if (Array.isArray(payload.tools) && payload.tools.length > 0) {
     const hasSignature = payload.tools.some(
       (t) => t && typeof t === "object" && t.function && typeof t.function.name === "string" && t.function.name === "end_turn",
@@ -1138,15 +1138,15 @@ function buildUpstreamPayload(params, mc, sess, runId) {
     freebuff_instance_id: sess.instanceId,
     trace_session_id: crypto.randomUUID(),
     run_id: runId,
-    // 官方 SDK：client_id = clientSessionId（会话级稳定标识），不是随机数
+    // Official SDK: client_id = clientSessionId (session-level stable identifier), not a random number
     client_id: stableFingerprint(runId || "session"),
     cost_mode: "free",
   };
   return payload;
 }
 
-// 第一阶段显式代码审计模式：只在调用方明确请求时触发 reviewer 子 run。
-// 普通 chat 永远只使用 root agent，不把 reviewer 当成模型 fallback。
+// Phase 1 explicit code review mode: only triggers the reviewer sub-run when the caller explicitly requests it.
+// Normal chat always uses the root agent only; reviewer is never treated as a model fallback.
 function isCodeReviewRequest(params) {
   return params && params.metadata && params.metadata.freebuff_mode === "code_review";
 }
@@ -1155,7 +1155,7 @@ function buildReviewerMessages(params) {
   const messages = Array.isArray(params.messages)
     ? params.messages.map((m) => ({ ...m }))
     : [];
-  // 与官方 createReviewer() 对齐：reviewer 继承 root 上下文，但不能调用工具或修改文件。
+  // Aligned with official createReviewer(): reviewer inherits root context but cannot call tools or modify files.
   messages.unshift({
     role: "system",
     content: "You are a subagent that reviews code changes and gives helpful critical feedback. Do not use any tools. Review the last file changes made by the assistant. Focus on missing requirements, correctness, regressions, dead code, missing imports, and consistency with the existing code. Be extremely concise and only suggest changes; do not modify files.",
@@ -1184,7 +1184,7 @@ function buildReviewerPayload(params, mc, sess, reviewerRunId) {
       ...params,
       metadata,
       messages: buildReviewerMessages(params),
-      // 官方 code-reviewer 的 toolNames=[]：reviewer 只能给建议，不能调用工具。
+      // Official code-reviewer toolNames=[]: reviewer can only give suggestions, cannot call tools.
       tools: undefined,
       tool_choice: undefined,
       parallel_tool_calls: undefined,
@@ -1196,10 +1196,10 @@ function buildReviewerPayload(params, mc, sess, reviewerRunId) {
 }
 
 // ---------------------------------------------------------------------------
-// chat 主流程
+// Chat main flow
 // ---------------------------------------------------------------------------
 
-// 查找模型配置：硬编码 MODELS 优先，动态表补充（合并表）
+// Find model config: hardcoded MODELS first, dynamic table supplements (merged)
 function findModelConfig(modelId) {
   const hit = MODELS.find((m) => m.id === modelId);
   if (hit) return hit;
@@ -1211,8 +1211,8 @@ function findModelConfig(modelId) {
   return null;
 }
 
-// 查找模型配置前确保动态注册表已加载。
-// 不能依赖 /v1/models 先被调用：Cloudflare 不保证两个请求落在同一 isolate。
+// Ensure dynamic registry is loaded before finding model config.
+// Cannot rely on /v1/models being called first: Cloudflare does not guarantee two requests land on the same isolate.
 async function resolveModelConfig(modelId) {
   let hit = findModelConfig(modelId);
   if (hit) return hit;
@@ -1236,7 +1236,7 @@ async function handleChat(request, env) {
   return executeChat(env, params, mc, isStream, "chat");
 }
 
-// OpenAI Responses API（/v1/responses）入口：把 Responses 请求翻译成 chat completions 上游调用
+// OpenAI Responses API (/v1/responses) entry: translates Responses requests into chat completions upstream calls
 async function handleResponses(request, env) {
   let params;
   try { params = await request.json(); } catch { return jsonResponse({ error: { message: "Invalid JSON", type: "parse_error" } }, 400); }
@@ -1247,7 +1247,7 @@ async function handleResponses(request, env) {
   return executeChat(env, responsesToChatParams(params, mc), mc, isStream, "responses");
 }
 
-// Responses API 请求 → chat completions 参数（字段名/结构翻译）
+// Responses API request → chat completions parameters (field name/structure translation)
 function responsesToChatParams(params, mc) {
   const chat = {};
   for (const k of ["temperature", "top_p", "tools", "tool_choice", "parallel_tool_calls", "stop", "seed", "store", "metadata", "user", "stream"]) {
@@ -1259,8 +1259,8 @@ function responsesToChatParams(params, mc) {
     chat.response_format = { type: params.text.format.type };
     if (params.text.format.json_schema) chat.response_format.json_schema = params.text.format.json_schema;
   }
-  // Responses 工具格式（扁平 function）→ chat completions 格式（function 包装）。
-  // 上游只接受 type:"function"，namespace/web_search 等非 function 工具一律过滤，避免反序列化报错。
+  // Responses tool format (flat function) → chat completions format (function wrapper).
+  // Upstream only accepts type:"function"; non-function tools like namespace/web_search are filtered out to avoid deserialization errors.
   if (Array.isArray(params.tools)) {
     chat.tools = params.tools
       .filter((t) => t && typeof t === "object" && t.type === "function")
@@ -1274,7 +1274,7 @@ function responsesToChatParams(params, mc) {
       }));
     if (chat.tools.length === 0) delete chat.tools;
   }
-  // Responses tool_choice → chat 格式；仅支持 function 类型，其它对象形式退回 auto
+  // Responses tool_choice → chat format; only supports function type, other object forms fall back to auto
   if (params.tool_choice && typeof params.tool_choice === "object") {
     if (params.tool_choice.type === "function" && params.tool_choice.name) {
       chat.tool_choice = { type: "function", function: { name: params.tool_choice.name } };
@@ -1287,7 +1287,7 @@ function responsesToChatParams(params, mc) {
   return chat;
 }
 
-// Responses API input → chat messages（input 可为字符串或消息条目数组）
+// Responses API input → chat messages (input can be a string or an array of message items)
 function responsesInputToMessages(input, instructions) {
   const messages = [];
   if (instructions) messages.push({ role: "system", content: instructions });
@@ -1300,7 +1300,7 @@ function responsesInputToMessages(input, instructions) {
       messages.push({ role: "tool", tool_call_id: item.call_id || "", content: typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? "") });
       continue;
     }
-    // function_call / reasoning / item_reference 等条目本地无法执行/回溯，跳过
+    // function_call / reasoning / item_reference entries cannot be executed/replayed locally, skip them
     if (item.type === "function_call" || item.type === "reasoning" || item.type === "item_reference") continue;
     const role = item.role || "user";
     const content = item.content;
@@ -1320,9 +1320,9 @@ function responsesInputToMessages(input, instructions) {
   return messages;
 }
 
-// 第一阶段：显式代码审计模式。
-// 这是 reviewer-only 入口：创建 root run 作为父链，再创建 code-reviewer 子 run，
-// 不执行普通 root chat，也不把 reviewer agent 混入普通模型路由。
+// Phase 1: explicit code review mode.
+// This is a reviewer-only entry point: create a root run as the parent chain, then create a code-reviewer sub-run,
+// without executing a normal root chat or mixing the reviewer agent into the normal model routing.
 async function executeCodeReview(env, chatParams, mc, isStream, mode) {
   const debug = env.FREEBUFF_DEBUG === "true";
   const reviewerAgent = mc.reviewer_agent;
@@ -1338,7 +1338,7 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
 
   const pool = parseAccounts(env);
   if (pool.length === 0) {
-    return jsonResponse({ error: { message: "缺少 FREEBUFF_TOKEN 环境变量", type: "config_error" } }, 503);
+    return jsonResponse({ error: { message: "Missing FREEBUFF_TOKEN environment variable", type: "config_error" } }, 503);
   }
 
   let lastErrMsg = "";
@@ -1354,7 +1354,7 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
       const sess = await createSession(token, mc.session);
       const root = await startRunChain(token, mc.root_agent || mc.agent);
       rootRunId = root.runId;
-      // Desktop 协议的关键：reviewer 是 root run 的子 run。
+      // Desktop protocol key: reviewer is a child run of the root run.
       reviewerRunId = await startRun(token, reviewerAgent, [rootRunId]);
       if (debug) console.log(`[review][acct ${acctTry + 1}] root=${rootRunId} reviewer=${reviewerRunId} model=${reviewerModel}`);
 
@@ -1412,15 +1412,15 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
   return jsonResponse({ error: { message: lastErrMsg || "code reviewer failed", type: "api_error" } }, 502);
 }
 
-// chat completions 与 responses 共用的上游执行：多号重试 + session/run 生命周期 + 流式/非流式出口
+// Shared upstream execution for chat completions and responses: multi-account retry + session/run lifecycle + streaming/non-streaming output
 async function executeChat(env, chatParams, mc, isStream, mode) {
   if (isCodeReviewRequest(chatParams)) return executeCodeReview(env, chatParams, mc, isStream, mode);
   const debug = env.FREEBUFF_DEBUG === "true";
   const pool = parseAccounts(env);
-  if (pool.length === 0) return jsonResponse({ error: { message: "缺少 FREEBUFF_TOKEN 环境变量", type: "config_error" } }, 503);
+  if (pool.length === 0) return jsonResponse({ error: { message: "Missing FREEBUFF_TOKEN environment variable", type: "config_error" } }, 503);
 
-  // 请求内多号重试：一个号失败（超时/429/428 重建无效/run 失败）立即冷却并换下一个号，最多试完整个账号池。
-  // 免费通道上游波动大（并发>1 即出问题、排队超时），单请求内换号比等客户端重试成功率高得多。
+  // In-request multi-account retry: if one account fails (timeout/429/428 stale session/run failure), immediately cool it down and try the next, up to the entire pool.
+  // Free-tier upstream is volatile (concurrency >1 causes issues, queue timeouts). Switching accounts within a single request is much more reliable than client retry.
   let lastErrMsg = "";
   for (let acctTry = 0; acctTry < pool.length; acctTry++) {
     const acct = pickToken(env, mc.session);
@@ -1433,12 +1433,12 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
       const sess = await createSession(token, mc.session);
       if (debug) console.log(`[acct ${acctTry + 1}] session=${sess.instanceId}`);
 
-      // 2) run 链
+      // 2) run chain
       const run = await startRunChain(token, mc.agent);
       if (debug) console.log(`[acct ${acctTry + 1}] run=${run.runId}`);
 
-      // 3) chat（428 waiting_room_required / 409 session_superseded = session 失效，
-      //    清缓存强制重建后重试一次；仍失败则冷却该号交给外层换号）
+      // 3) chat (428 waiting_room_required / 409 session_superseded = session stale,
+      //    clear cache, force-rebuild, and retry once; if still failing, cool down the account and let the outer loop switch)
       let resp, errText = "", sessForChat = sess;
       for (let attempt = 0; attempt < 2; attempt++) {
         const payload = buildUpstreamPayload(chatParams, mc, sessForChat, run.runId);
@@ -1447,12 +1447,12 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
           "Content-Type": "application/json",
           "x-freebuff-instance-id": sessForChat.instanceId,
         };
-        // x-freebuff-acting-user-id：⚠️ 实测（2026-08-10）不带它 chat 才能过（200），
-        // 带上反而 409 session_superseded（"Another instance of freebuff has taken over
+        // x-freebuff-acting-user-id: ⚠️ Tested (2026-08-10) — chat only passes (200) without this header,
+        // adding it causes 409 session_superseded ("Another instance of freebuff has taken over
         // this session. Only one instance per account is allowed."）。
-        // 原因：预生成 instance-id 已把 session 绑定到 token 自身，再带 acting-user-id
-        // 会让服务端以为存在第二个实例抢同一 slot。桌面版默认也不带此头（仅模拟
-        // 他人才带）。因此这里不再发送 acting-user-id。
+        // Reason: the pre-generated instance-id already binds the session to the token itself; adding acting-user-id
+        // makes the server think a second instance is competing for the same slot. Desktop also omits this header by default (only used when
+        // impersonating another user). So we no longer send acting-user-id.
         if (debug) console.log(`[acct ${acctTry + 1}][chat] attempt=${attempt + 1}`);
         const chatInit = {
           method: "POST", headers, body: JSON.stringify(payload),
@@ -1465,8 +1465,8 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
                 signal: AbortSignal.timeout(NONSTREAM_TIMEOUT_MS),
               });
         } catch (error) {
-          // 空流只视为当前账号的同模型 session 疑似脏状态：
-          // 删除上游旧实例，重建同模型 session，再重试一次；绝不改成别的模型。
+          // Empty stream is treated as a potentially dirty session for the same model on the current account:
+          // delete the old upstream instance, rebuild the same-model session, and retry once; never switch to a different model.
           if (error instanceof EmptyUpstreamStreamError && attempt === 0) {
             await deleteUpstreamSession(token, sessForChat.instanceId);
             if (debug) console.log(`[acct ${acctTry + 1}][chat] empty stream, same-model session recovery`);
@@ -1481,8 +1481,8 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         }
         errText = await resp.text();
         recordAccountObservation(token, resp.status, errText);
-        // 428 waiting_room_required（无活跃 session）/ 409 session_superseded（被新 session 顶替）
-        // 都说明缓存 instance 已失效 → 清缓存强制重建后重试一次；不是限流，不计冷却
+        // 428 waiting_room_required (no active session) / 409 session_superseded (replaced by a new session)
+        // both indicate the cached instance is stale → clear cache, force rebuild, and retry once; not rate limiting, no cooldown
         const staleSession =
           isStaleSessionGate(resp.status, errText) ||
           // Older upstream wrappers returned model mismatch as HTTP 502.
@@ -1493,7 +1493,7 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
           sessForChat = await createSession(token, mc.session, true);
           continue;
         }
-        // 重建后仍失败：该号 session 状态异常，冷却交给外层换号
+        // Still failing after rebuild: account session state is abnormal, cool down and let outer loop switch
         if (staleSession) cooldown(token, 60 * 1000);
         cooldown(token, parseCooldown(errText, resp.status));
         break;
@@ -1518,7 +1518,7 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
     } catch (e) {
       console.error("[" + mode + "]", e);
       const msg = String(e.message || e);
-      // 额度探测确认耗尽：清除当前模型 session，按上游 retryAfterMs 冷却后切号。
+      // Quota probe confirmed exhaustion: clear current model session, cool down per upstream retryAfterMs, then switch accounts.
       if (e instanceof QuotaExhaustedError) {
         sessCache.delete(token + ":" + mc.session);
         cooldown(token, e.retryAfterMs || 5 * 60 * 1000);
@@ -1526,8 +1526,8 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
       if (e instanceof EmptyUpstreamStreamError) {
         cooldown(token, 60 * 1000);
       }
-      // 其他上游交互失败/超时继续沿用原有冷却逻辑；流式 chat 不再因固定 20s abort 进入这里。
-      // createSession 429（额度耗尽）按 retryAfterMs/文本冷却，不能固定 60s。
+      // Other upstream interaction failures/timeouts continue using the original cooldown logic; streaming chat no longer enters here from a fixed 20s abort.
+      // createSession 429 (quota exhausted) uses retryAfterMs/text-based cooldown, not a fixed 60s.
       if (/create session failed|stayed queued|start_run failed|session_model_mismatch|abort|timeout|timed out|terminated/i.test(msg)) {
         const m429 = msg.match(/429/);
         cooldown(token, m429 ? parseCooldown(msg, 429) : 60 * 1000);
@@ -1541,7 +1541,7 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
 
 
 // ---------------------------------------------------------------------------
-// Anthropic Messages API（本地适配，复用稳定的 executeChat 主链路）
+// Anthropic Messages API (local adapter, reuses the stable executeChat main path)
 // ---------------------------------------------------------------------------
 function anthropicModelToOpenAI(model) {
   const raw = String(model || DEFAULT_MODEL).trim();
@@ -1582,8 +1582,8 @@ function anthropicToChat(body, mc) {
   for (const k of ["temperature", "top_p", "top_k", "presence_penalty", "frequency_penalty"]) if (body[k] != null) chat[k] = body[k];
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length) chat.stop = body.stop_sequences;
   if (body.thinking?.type === "enabled" && Number.isFinite(body.thinking.budget_tokens)) {
-    // Anthropic thinking budget → reasoning effort 分档；经 clamp 归一化后即使产生
-    // medium（如 deepseek-v4-flash 不支持）也会被钳到最近可用档
+    // Anthropic thinking budget → reasoning effort mapping; even if clamping produces
+    // medium (unsupported by deepseek-v4-flash), it will be clamped to the nearest available level
     chat.reasoning_effort = body.thinking.budget_tokens >= 16000 ? "high" : body.thinking.budget_tokens >= 8000 ? "medium" : "low";
   }
   if (body.metadata && typeof body.metadata === "object") chat.metadata = body.metadata;
@@ -1729,7 +1729,7 @@ function unwrapData(obj) {
   return obj;
 }
 
-// 流式：把上游 SSE 剥 {data:...} 包装后透传
+// Streaming: strip the {data:...} wrapper from upstream SSE and pass through
 function pipeUpstreamToClient(upstreamBody, writable, onComplete) {
   const reader = upstreamBody.getReader();
   const writer = writable.getWriter();
@@ -1765,7 +1765,7 @@ function pipeUpstreamToClient(upstreamBody, writable, onComplete) {
   })();
 }
 
-// 非流式：聚合上游流成 OpenAI 非流式对象
+// Non-streaming: aggregate upstream stream into an OpenAI non-streaming response object
 async function streamToNonStream(upstreamBody, upstreamModel) {
   const reader = upstreamBody.getReader();
   const decoder = new TextDecoder();
@@ -1808,7 +1808,7 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
 }
 
 // ---------------------------------------------------------------------------
-// Responses API（/v1/responses）输出
+// Responses API (/v1/responses) output
 // ---------------------------------------------------------------------------
 
 function responsesBase(mc, respId, createdAt) {
@@ -1843,8 +1843,8 @@ function responsesUsage() {
   return { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0 };
 }
 
-// 上游是 Chat Completions 格式，Responses API 要求 input/output_tokens。
-// 统一归一化，避免把不完整或错误格式的 usage 直接透传给严格客户端。
+// Upstream is Chat Completions format; Responses API requires input/output_tokens.
+// Normalize uniformly to avoid passing incomplete or malformed usage directly to strict clients.
 function chatUsageToResponsesUsage(usage) {
   if (!usage || typeof usage !== "object") return responsesUsage();
   const inputTokens = Number.isFinite(usage.input_tokens)
@@ -1869,7 +1869,7 @@ function chatUsageToResponsesUsage(usage) {
   };
 }
 
-// 流式：上游 chat SSE → Responses API 事件序列（response.created … response.completed）
+// Streaming: upstream chat SSE → Responses API event sequence (response.created ... response.completed)
 async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onComplete) {
   const reader = upstreamBody.getReader();
   const writer = writable.getWriter();
@@ -1880,11 +1880,11 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
   let buf = "", model = "", usage = null;
   const send = (obj) => writer.write(encoder.encode("data: " + JSON.stringify(obj) + "\n\n"));
 
-  // 按上游出现顺序记录输出项：message（文本）或 function_call（工具调用）
+  // Record output items in upstream order: message (text) or function_call (tool call)
   const items = [];
   let nextOutputIndex = 0;
   let contentItem = null;
-  const toolItems = new Map(); // 上游 tool_calls index → 输出项
+  const toolItems = new Map(); // upstream tool_calls index → output item
 
   const startContent = () => {
     const item = {
@@ -1935,7 +1935,7 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
                 if (obj.model) model = obj.model;
                 if (obj.usage) usage = obj.usage;
 
-            // 工具调用增量（chat 格式 delta.tool_calls[]）
+            // Tool call delta (chat format delta.tool_calls[])
             if (Array.isArray(delta.tool_calls)) {
               for (const tc of delta.tool_calls) {
                 if (!tc || typeof tc !== "object") continue;
@@ -1955,7 +1955,7 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
               }
             }
 
-            // 文本增量
+            // Text delta
             if (delta.content) {
               if (!contentItem) contentItem = startContent();
               if (!contentItem.started) {
@@ -1970,7 +1970,7 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
         }
       }
 
-      // 既无文本也无工具调用时补一个空 message，避免 output 为空数组
+      // When there is neither text nor tool calls, add an empty message to avoid an empty output array
       if (items.length === 0) {
         const item = startContent();
         item.started = true;
@@ -1978,7 +1978,7 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
         await send({ type: "response.content_part.added", item_id: item.id, output_index: item.outputIndex, content_index: item.contentIndex, part: { type: "output_text", text: "", annotations: [] } });
       }
 
-      // 收尾：按出现顺序输出每个输出项的 done 事件
+      // Cleanup: emit done events for each output item in order of appearance
       for (const item of items) {
         if (item.kind === "message") {
           if (!item.started) {
@@ -2012,12 +2012,12 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
   })();
 }
 
-// 非流式：聚合上游流成 Responses API 非流式对象
+// Non-streaming: aggregate upstream stream into a Responses API non-streaming response object
 async function responsesToNonStream(upstreamBody, mc) {
   const reader = upstreamBody.getReader();
   const decoder = new TextDecoder();
   let buf = "", model = "", outputText = "", reasoning = "", usage = null;
-  const toolItems = new Map(); // 上游 tool_calls index → {id, callId, name, args}
+  const toolItems = new Map(); // upstream tool_calls index → {id, callId, name, args}
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -2081,10 +2081,10 @@ async function responsesToNonStream(upstreamBody, mc) {
 
 
 // ---------------------------------------------------------------------------
-// 工具
+// Tool
 // ---------------------------------------------------------------------------
 
-// 轻量缓存清理：避免长时间运行后 Map 无限膨胀（Workers 无自动 GC）
+// Lightweight cache cleanup: prevent unbounded Map growth over time (Workers have no auto GC)
 function cleanCache() {
   const now = Date.now();
   try {
@@ -2102,10 +2102,10 @@ function cleanCache() {
   } catch {}
 }
 
-// /v1/models 返回 硬编码 MODELS + 动态官方清单（合并去重）
-// ⚠️ 不要在这里查上游 GET /api/v1/freebuff/session（额度/状态）：
-// 该接口会占用账号 session，而 Freebuff 一个号同一时间只能一个客户端在线，
-// 查询会干扰/顶掉正在进行的 chat 会话（428 waiting_room_required）。
+// /v1/models returns hardcoded MODELS + dynamic official list (merged, deduplicated)
+// ⚠️ Do NOT query upstream GET /api/v1/freebuff/session (quota/status) here:
+// This endpoint would occupy the account session, and Freebuff only allows one client online per account at a time,
+// Querying would disrupt/interfere with an ongoing chat session (428 waiting_room_required).
 async function handleModels() {
   let modelList = MODELS;
   try {

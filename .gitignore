@@ -2,41 +2,40 @@ node_modules/
 .dev.vars
 test/worker_tmp.mjs
 
-# 凭证/token 文件，绝不提交
+# Credential/token files, never commit
 freebuff_tools/freebuff_credentials.json
 **/freebuff_credentials.json
-# Docker 容器凭据目录，绝不提交
+# Docker container credentials directory, never commit
 credentials/
 __pycache__/
 test/
 
-# 部署脚本含凭据读取逻辑，仅本地使用，不推送
+# Deploy script contains credential reading logic, local use only, do not push
 /credentials.yaml
 /deploy.sh
 
-# 更新记录本地自用，不推送 GitHub
+# Update records, local use only, do not push to GitHub
 CHANGELOG.md
 
-# wrangler 本地缓存/状态，不提交
+# Wrangler local cache/state, do not commit
 .wrangler/
 
-# Vercel 本地缓存/项目文件，不提交
+# Vercel local cache/project files, do not commit
 .vercel/
 
-# ⚠️ wrangler.toml 含敏感变量（FREEBUFF_TOKEN 等），绝不提交 GitHub
+# ⚠️ wrangler.toml contains sensitive variables (FREEBUFF_TOKEN, etc.), never commit to GitHub
 wrangler.toml
 
-# ⚠️ .env 及所有带真实变量值的文件，绝不提交
+# ⚠️ .env and all files with real variable values, never commit
 .env
-.env.*
 
-# 本地日志分析文件，绝不提交
+# Local log analysis files, never commit
 logs/
 
-# Hermes 本地计划、实验补丁和会话资料，仅本地保存
+# Hermes local plans, experimental patches, and session data, local only
 .hermes/
 
-# 本地额度验证脚本，仅本地使用
+# Local quota verification script, local use only
 freebuff_tools/test_extract_freebuff_quota.py
 
 wrangler.jsonc
