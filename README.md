@@ -18,7 +18,7 @@ Exposes **freebuff/codebuff**'s free models as an **OpenAI-compatible API**. Sin
 - 📢 **Ad & Streak Flow Compatibility**: Before creating a new session, the Worker requests ads (matching the official client flow) and calls `GET /api/v1/freebuff/streak` for check-in. Failures are silently skipped — they never block the chat
 - 🧩 **OpenAI Compatible**: `/v1/models`, `/v1/chat/completions`, `/v1/responses` (streaming/non-streaming depending on interface support)
 - 📨 **Anthropic Messages API**: Supports `/v1/messages`, `/messages`, and corresponding `count_tokens` routes — usable with Anthropic SDK / compatible clients
-- ❤️ **Health Check**: `GET /healthz` (no auth required) — convenient for monitoring uptime
+- ❤️ **Health Check**: `GET /health` (no auth required) — convenient for monitoring uptime
 - 📦 **Single-File Deployment**: Zero dependencies, single `worker.js` — works across CF / Docker / VPS
 
 ## 📨 Anthropic Messages API Support
@@ -75,7 +75,7 @@ Apart from these two special models, all regular models are understood to have a
 After deployment, use (**no API key required**):
 
 ```bash
-curl https://your-worker.workers.dev/healthz
+curl https://your-worker.workers.dev/health
 # {"status":"ok","version":"1.4.0","time":"..."}
 ```
 
@@ -141,10 +141,10 @@ python3 extract_freebuff.py chat "Hello"     # Send a test message to the model 
 # 1. Prepare the directory — copy the following files: worker.js server.js package.json Dockerfile docker-compose.yml
 mkdir freebuff2api && cd freebuff2api
 
-# 2. Configure .env (API key + optional RELAY_KEY)
+# 2. Configure .env (API key + optional RELAY_URL)
 cat > .env <<'EOF'
 FREEBUFF_API_KEY=your-api-key
-RELAY_KEY=
+RELAY_URL=
 EOF
 
 # 3. Account credentials: place one JSON file per account under credentials/ (server.js reads the authToken field)
@@ -166,7 +166,7 @@ After startup, the service listens on `0.0.0.0:8787` (compose maps to host port 
 | `FREEBUFF_API_KEY` | API access key (defaults to `freebuff-default-key`) |
 | `FREEBUFF_DEBUG` | Set to `true` to enable per-request debug logging |
 | `CODEBUFF_API` | Upstream address; empty = direct to `https://www.codebuff.com`; set to a relay domain when using a self-hosted relay |
-| `RELAY_KEY` | Relay key (required when `CODEBUFF_API` points to an authenticated relay) |
+| `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all traffic through relay |
 
 > ⚠️ Inside the container, `credentials/` is mounted as read-only. `server.js` reads and assembles `FREEBUFF_TOKEN` at startup (multiple accounts comma-separated).
 
@@ -193,13 +193,13 @@ The simplest and most controllable approach — no local environment needed, no 
 5. Verify after deployment:
 
    ```bash
-   curl https://your-worker.workers.dev/healthz          # Health check (no key required)
+   curl https://your-worker.workers.dev/health          # Health check (no key required)
    curl https://your-worker.workers.dev/v1/models \
      -H "Authorization: Bearer ***"           # Model list
    ```
 
 > Each time you modify the code, repeat step 3: edit code → paste new content → deploy. **Linking to GitHub for auto-deployment is not recommended** (see below).
-> ⚠️ **Version Convention**: Before each deployment, bump the version number (in the healthz `version` field + `X-Freebuff2api-Version` response header) so you can confirm whether the update is live.
+> ⚠️ **Version Convention**: Before each deployment, bump the version number (in the health `version` field + `X-Freebuff2api-Version` response header) so you can confirm whether the update is live.
 
 ### GitHub Auto-Deployment (❌ Not Recommended)
 
@@ -229,7 +229,7 @@ The default domain `https://your-worker.your-subdomain.workers.dev` may be inacc
 
 ```bash
 # Health check
-curl https://your-worker.workers.dev/healthz
+curl https://your-worker.workers.dev/health
 
 # Model list
 curl https://your-worker.workers.dev/v1/models \

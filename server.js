@@ -41,12 +41,12 @@ const env = {
   FREEBUFF_API_KEY: process.env.FREEBUFF_API_KEY || 'freebuff-default-key',
   FREEBUFF_DEBUG: process.env.FREEBUFF_DEBUG || 'false',
   CODEBUFF_API: process.env.CODEBUFF_API || '',
-  RELAY_KEY: process.env.RELAY_KEY || '',
+  RELAY_URL: process.env.RELAY_URL || '',
 };
 
 console.log(`[server] start: ${tokenLines.length} tokens, apiKey=${env.FREEBUFF_API_KEY.slice(0,8)}..., debug=${env.FREEBUFF_DEBUG}`);
 if (env.CODEBUFF_API) console.log(`[server] CODEBUFF_API=${env.CODEBUFF_API}`);
-if (env.RELAY_KEY) console.log(`[server] RELAY_KEY set`);
+if (env.RELAY_URL) console.log(`[server] RELAY_URL=${env.RELAY_URL}`);
 
 // === HTTP server ===
 const port = parseInt(process.env.PORT || '8787', 10);

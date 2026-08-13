@@ -27,7 +27,7 @@ python3 extract_freebuff.py quota           # Check usage
 python3 extract_freebuff.py chat "Hello"    # Test chat
 
 # Test API endpoints
-curl http://localhost:8787/healthz
+curl http://localhost:8787/health
 curl http://localhost:8787/v1/models -H "Authorization: Bearer <key>"
 curl http://localhost:8787/v1/chat/completions -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"Hi"}]}'
 ```
@@ -48,7 +48,7 @@ curl http://localhost:8787/v1/chat/completions -H "Authorization: Bearer <key>" 
 
 ```
 Client → worker.js (fetch handler)
-  ├── /healthz → account health summary (no auth)
+  ├── /health → account health summary (no auth)
   ├── /v1/models → static model list (no upstream calls)
   ├── /v1/chat/completions → executeChat()
   ├── /v1/responses → responsesToChatParams() → executeChat()
@@ -78,7 +78,7 @@ executeChat()
 
 - **Dynamic model registry**: On startup and every 6 hours, `refreshDynamicModelsIfStale()` fetches Freebuff's official TypeScript source files from GitHub raw (3 sources: `free-agents.ts`, `freebuff-models.ts`, `freebuff-model-ids.ts`). Falls back to GitHub Releases JSON (`freebuff-models.json`), then hardcoded `MODELS` array.
 
-- **Account health observation**: Passive — records upstream responses (`recordAccountObservation()`). No active probing. `/healthz` reports summary from cache.
+- **Account health observation**: Passive — records upstream responses (`recordAccountObservation()`). No active probing. `/health` reports summary from cache.
 
 - **Buffy system prompt injection**: Freebuff requires `"You are Buffy, the strategic coding assistant."` at byte-position 0 of system messages. Auto-injected in `normalizeMessages()`.
 
@@ -109,7 +109,7 @@ Three upstream quota pools (from Freebuff's `freebuff-models.ts`):
 | `FREEBUFF_API_KEY` | Custom API key for clients (default: `freebuff-default-key`) |
 | `FREEBUFF_DEBUG` | `true` for per-request debug logging |
 | `CODEBUFF_API` | Upstream URL override (default: `https://www.codebuff.com`) |
-| `RELAY_KEY` | Relay auth key (when `CODEBUFF_API` points to a relay) |
+| `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all upstream traffic through relay |
 | `PORT` / `HOST` | Listen port/address (default: `8787` / `0.0.0.0`) |
 
 ### Docker Deployment

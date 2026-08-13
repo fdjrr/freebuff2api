@@ -1,4 +1,5 @@
-const CODEBUFF_API = "https://www.codebuff.com";
+let CODEBUFF_API = "https://www.codebuff.com";
+let RELAY_URL = "";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
 const DEFAULT_API_KEY = "freebuff-default-key";
 const VERSION = "1.8.9";
@@ -330,7 +331,7 @@ const MODELS = [
 //
 // Three official quota pools (all session counts, not token counts):
 //   1. PREMIUM pool: shared 6/day (FREEBUFF_PREMIUM_SESSION_LIMIT=6)
-//      m3 / v4-pro / luna / laguna-s-2.1 / muse-spark / greg-2 
+//      m3 / v4-pro / luna / laguna-s-2.1 / muse-spark / greg-2
 //      （FREEBUFF_WEB_PREMIUM_MODEL_IDS）
 //   2. STANDARD pool: browser/Web 6/day
 //      (FREEBUFF_WEB_STANDARD_SESSION_LIMIT=6; = all non-premium models,
@@ -375,11 +376,15 @@ const DESKTOP_INCLUDE_RATE_LIMITS = { "x-freebuff-include-unused-rate-limits": "
 
 export default {
   async fetch(request, env) {
+    // Read dynamic config from env (overrides hardcoded defaults)
+    if (env.CODEBUFF_API) CODEBUFF_API = env.CODEBUFF_API;
+    if (env.RELAY_URL) RELAY_URL = env.RELAY_URL;
+
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
 
-    // healthz does not require auth: health checks/monitoring probes should not depend on API key
-    if (request.method === "GET" && url.pathname === "/healthz") {
+    // health does not require auth: health checks/monitoring probes should not depend on API key
+    if (request.method === "GET" && url.pathname === "/health") {
       // Health check reads the local snapshot from the Worker's most recent real request.
       // Do not fan-out GET /session and /me upstream just because of a public probe; these requests
       // produce extra behavior and may interfere with an ongoing session on the same account.
@@ -451,7 +456,7 @@ function parseAccounts(env) {
 const acctHealth = new Map(); // token -> { alive, state, uid, quota, checkedAt }
 const HEALTH_OBSERVATION_TTL_MS = 10 * 60 * 1000;
 
-// Only record upstream results observed by real business requests. Do not proactively probe in healthz,
+// Only record upstream results observed by real business requests. Do not proactively probe in health,
 // and do not mistake network errors/unknown responses as account failures.
 function recordAccountObservation(token, status, dataOrText, extra = {}) {
   if (!token) return;
@@ -731,6 +736,28 @@ const SESSION_TIMEOUT_MS = 10000;  // session/run short interactions fail faster
 // Do not abort or switch accounts while quota is still available; keep waiting for upstream.
 const STREAM_NO_DATA_PROBE_DELAY_MS = 20000;
 
+// Resolve upstream URL: if RELAY_URL is set, route through relay (inject relay headers)
+function resolveUpstream(path, extraHeaders = {}) {
+  if (RELAY_URL) {
+    const relayHeaders = { ...extraHeaders };
+    relayHeaders["x-relay-target"] = CODEBUFF_API;
+    relayHeaders["x-relay-path"] = path;
+    return [RELAY_URL, relayHeaders];
+  }
+  return [CODEBUFF_API + path, extraHeaders];
+}
+
+// Resolve direct chat fetch URL (for streaming, which bypasses up())
+function resolveChatUrl(path, headers) {
+  if (RELAY_URL) {
+    const h = new Headers(headers);
+    h.set("x-relay-target", CODEBUFF_API);
+    h.set("x-relay-path", path);
+    return [RELAY_URL, h];
+  }
+  return [CODEBUFF_API + path, headers];
+}
+
 async function up(method, path, token, body, extraHeaders = {}, timeoutMs = UPSTREAM_TIMEOUT_MS) {
   const headers = {};
   // Desktop protocol: do not manually set User-Agent (fetch default), only carry necessary business headers
@@ -738,9 +765,10 @@ async function up(method, path, token, body, extraHeaders = {}, timeoutMs = UPST
   if (body !== undefined) headers["Content-Type"] = "application/json";
   Object.assign(headers, extraHeaders);
 
-  const resp = await fetch(CODEBUFF_API + path, {
+  const [fetchUrl, finalHeaders] = resolveUpstream(path, { ...headers });
+  const resp = await fetch(fetchUrl, {
     method,
-    headers,
+    headers: finalHeaders,
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -1359,14 +1387,12 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
       if (debug) console.log(`[review][acct ${acctTry + 1}] root=${rootRunId} reviewer=${reviewerRunId} model=${reviewerModel}`);
 
       const payload = buildReviewerPayload(chatParams, { ...mc, upstream: reviewerModel }, sess, reviewerRunId);
-      const headers = {
+      const resp = await fetch(...resolveChatUrl("/api/v1/chat/completions", {
         Authorization: "Bearer " + token,
         "Content-Type": "application/json",
         "x-freebuff-instance-id": sess.instanceId,
-      };
-      const resp = await fetch(CODEBUFF_API + "/api/v1/chat/completions", {
+      }), {
         method: "POST",
-        headers,
         body: JSON.stringify(payload),
         signal: isStream ? undefined : AbortSignal.timeout(NONSTREAM_TIMEOUT_MS),
       });
@@ -1454,13 +1480,14 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         // makes the server think a second instance is competing for the same slot. Desktop also omits this header by default (only used when
         // impersonating another user). So we no longer send acting-user-id.
         if (debug) console.log(`[acct ${acctTry + 1}][chat] attempt=${attempt + 1}`);
+        const [chatUrl, chatHeaders] = resolveChatUrl("/api/v1/chat/completions", headers);
         const chatInit = {
-          method: "POST", headers, body: JSON.stringify(payload),
+          method: "POST", headers: chatHeaders, body: JSON.stringify(payload),
         };
         try {
           resp = isStream
-            ? await fetchStreamWithQuotaGuard(CODEBUFF_API + "/api/v1/chat/completions", chatInit, token, mc.session)
-            : await fetch(CODEBUFF_API + "/api/v1/chat/completions", {
+            ? await fetchStreamWithQuotaGuard(chatUrl, chatInit, token, mc.session)
+            : await fetch(chatUrl, {
                 ...chatInit,
                 signal: AbortSignal.timeout(NONSTREAM_TIMEOUT_MS),
               });
