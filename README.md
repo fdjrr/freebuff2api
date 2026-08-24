@@ -82,9 +82,11 @@ curl https://your-worker.workers.dev/health
 - The `version` field shows the current deployed version — **it changes with every deployment**, useful for verifying whether the latest update is live (CF edge cache has a delay; wait a few seconds or add a random parameter when checking)
 - Suitable for UptimeRobot / self-hosted monitoring
 
+For authenticated account details, use `GET /v1/accounts` (or `/accounts`). It reports masked tokens, access tiers, pool/rate-limit metadata, and local cooldown state; full tokens are never returned. This endpoint may actively query upstream account status, so it should not be used as a high-frequency monitoring probe.
+
 ## 🔑 Obtaining FREEBUFF_TOKEN
 
-The freebuff auth token is obtained via the same **authorization code polling** mechanism used by the official CLI. The project includes an extraction tool at `freebuff_tools/extract_freebuff.py`, with an interactive flow identical to `cline_oauth.py`.
+The freebuff auth token is obtained via the same **authorization code polling** mechanism used by the official CLI. The project includes an extraction tool at `tools/extract.py`, with an interactive flow identical to `cline_oauth.py`.
 
 ### Method A: GitHub Actions Workflow (Recommended, Remote Extraction)
 
@@ -110,21 +112,21 @@ The repository includes a workflow at `.github/workflows/extract-token.yml` that
 ### Method B: Local Extraction
 
 ```bash
-cd freebuff_tools
-python3 extract_freebuff.py login   # Prints the authorization URL to the terminal — authorize in browser, then auto-poll
-python3 extract_freebuff.py show    # Displays all accounts: email + token + status + summary, one per line
-python3 extract_freebuff.py tgsend  # Test Telegram connectivity (when TG is configured)
+cd tools
+python3 extract.py login   # Prints the authorization URL to the terminal — authorize in browser, then auto-poll
+python3 extract.py show    # Displays all accounts: email + token + status + summary, one per line
+python3 extract.py tgsend  # Test Telegram connectivity (when TG is configured)
 ```
 
-When running `login` locally, each account is **appended with a separate key** to `freebuff_tools/freebuff_credentials.json` (does not overwrite existing accounts, supports Google / GitHub login, both auto-recorded). This file is covered by `.gitignore` and will not be committed to GitHub. See `freebuff_tools/freebuff_credentials.example.json` for the structure.
+When running `login` locally, each account is **appended with a separate key** to `tools/freebuff_credentials.json` (does not overwrite existing accounts, supports Google / GitHub login, both auto-recorded). This file is covered by `.gitignore` and will not be committed to GitHub. See `tools/freebuff_credentials.example.json` for the structure.
 
 Other useful commands:
 
 ```bash
-python3 extract_freebuff.py export           # Summarize all account tokens, one per line — ready to copy into CF Workers variables
-python3 extract_freebuff.py quota            # Check usage
-python3 extract_freebuff.py session          # Create / check sessions
-python3 extract_freebuff.py chat "Hello"     # Send a test message to the model API
+python3 extract.py export           # Summarize all account tokens, one per line — ready to copy into CF Workers variables
+python3 extract.py quota            # Check usage
+python3 extract.py session          # Create / check sessions
+python3 extract.py chat "Hello"     # Send a test message to the model API
 ```
 
 > 💡 `show` internally uses `GET /api/v1/freebuff/session` to probe each account (**no session created, zero cost**), displaying all statuses at once: active + quota / token expired / banned / region-restricted / quota exhausted. For banned accounts, the official API returns `status: banned` on all endpoints. With multiple accounts, `export` outputs each token on a separate line — paste them directly into the Cloudflare Worker variable `FREEBUFF_TOKEN` (newline-separated).
@@ -206,7 +208,7 @@ The simplest and most controllable approach — no local environment needed, no 
 While CF supports connecting a GitHub repository for auto-deployment, **it's not advised**:
 
 - Every push triggers a deployment — locally unverified changes could hit production directly
-- Additional configuration for build commands / root directory is needed; auxiliary files like `freebuff_tools/` in the repository are also pulled in
+- Additional configuration for build commands / root directory is needed; auxiliary files like `tools/` in the repository are also pulled in
 - Secrets and branch states can easily become inconsistent, making troubleshooting difficult
 - This repository contains token extraction scripts — auto-syncing increases the exposure surface
 

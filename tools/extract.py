@@ -2,13 +2,13 @@
 """Freebuff authToken extraction script (authorization code polling flow, interactive mode aligned with cline_oauth.py).
 
 Usage:
-  python3 extract_freebuff.py login           # Start login (auth link via TG + poll for token)
-  python3 extract_freebuff.py tgsend          # Test Telegram connectivity (send a test message)
-  python3 extract_freebuff.py show            # Show all accounts (email + full token + status + one-per-line summary)
-  python3 extract_freebuff.py session         # Test session creation (POST)
-  python3 extract_freebuff.py chat [message]   # Send a test message to the model API
-  python3 extract_freebuff.py quota           # Check usage via /api/v1/usage
-  python3 extract_freebuff.py export          # Export all account tokens, one per line (copy into CF Workers variables)
+  python3 extract.py login           # Start login (auth link via TG + poll for token)
+  python3 extract.py tgsend          # Test Telegram connectivity (send a test message)
+  python3 extract.py show            # Show all accounts (email + full token + status + one-per-line summary)
+  python3 extract.py session         # Test session creation (POST)
+  python3 extract.py chat [message]   # Send a test message to the model API
+  python3 extract.py quota           # Check usage via /api/v1/usage
+  python3 extract.py export          # Export all account tokens, one per line (copy into CF Workers variables)
 
 Flow (aligned with official CLI):
   1. Generate device fingerprint fingerprintId

@@ -410,6 +410,9 @@ export default {
     if (request.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
       return await handleModels();
     }
+    if (request.method === "GET" && (url.pathname === "/v1/accounts" || url.pathname === "/accounts" || url.pathname === "/v1/health" || url.pathname === "/health")) {
+      return await handleAccountStatus(env);
+    }
     if (request.method === "POST" && (url.pathname === "/v1/chat/completions" || url.pathname === "/chat/completions")) {
       return handleChat(request, env);
     }
@@ -669,19 +672,40 @@ function isQuotaExhausted(info, sessionModel) {
   return entry.limit - entry.recentCount <= 0;
 }
 
-function parseCooldown(text, status) {
-  // Prefer retryAfterMs from JSON response (luna models return {"retryAfterMs": 15506639} on 429)
-  const jm = (text || "").match(/"retryAfterMs"\s*:\s*(\d+)/);
+function parseCooldown(text, status, headers) {
+  // 1. Check Retry-After header if provided
+  if (headers) {
+    const ra = headers.get ? headers.get("retry-after") : headers["retry-after"];
+    if (ra) {
+      const sec = parseInt(ra, 10);
+      if (!isNaN(sec) && sec > 0) return Math.min(sec * 1000, 24 * 3600 * 1000);
+      const d = Date.parse(ra);
+      if (!isNaN(d) && d > Date.now()) return Math.min(d - Date.now(), 24 * 3600 * 1000);
+    }
+  }
+
+  // 2. Prefer retryAfterMs / resetsAt from JSON response
+  const jm = (text || "").match(/"retryAfterMs"\s*:\s*(\d+)/i);
   if (jm) {
     const ms = parseInt(jm[1], 10);
-    if (ms > 0) return Math.min(ms, 6 * 3600 * 1000);
+    if (ms > 0) return Math.min(ms, 24 * 3600 * 1000);
   }
-  const m = (text || "").match(/try again in (?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/i);
-  if (m) {
+
+  const rm = (text || "").match(/"resetsAt"\s*:\s*"?([^",\s\}]+)"?/i);
+  if (rm) {
+    const d = Date.parse(rm[1]);
+    if (!isNaN(d) && d > Date.now()) return Math.min(d - Date.now(), 24 * 3600 * 1000);
+  }
+
+  // 3. Human readable text: "try again in Xh Ym Zs" or "resets in Xm"
+  const m = (text || "").match(/(?:try again in|resets? in|wait)\s+(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/i);
+  if (m && (m[1] || m[2] || m[3])) {
     const ms = (parseInt(m[1]||0,10)*3600 + parseInt(m[2]||0,10)*60 + parseInt(m[3]||0,10)) * 1000;
-    if (ms > 0) return Math.min(ms, 6*3600*1000);
+    if (ms > 0) return Math.min(ms, 24 * 3600 * 1000);
   }
-  return status === 429 ? 5*60*1000 : 60*1000;
+
+  // 4. Default 429 cooldown: minimal 15 menit agar tidak spam session
+  return status === 429 ? 15 * 60 * 1000 : 60 * 1000;
 }
 
 class QuotaExhaustedError extends Error {
@@ -736,26 +760,54 @@ const SESSION_TIMEOUT_MS = 10000;  // session/run short interactions fail faster
 // Do not abort or switch accounts while quota is still available; keep waiting for upstream.
 const STREAM_NO_DATA_PROBE_DELAY_MS = 20000;
 
+let relayIdx = 0;
+function getRelayUrl() {
+  if (!RELAY_URL) return "";
+  const urls = RELAY_URL.split(",").map(u => u.trim()).filter(Boolean);
+  if (urls.length === 0) return "";
+  const selected = urls[relayIdx % urls.length];
+  relayIdx = (relayIdx + 1) % urls.length;
+  return selected;
+}
+
+// Standard Codebuff CLI / Desktop mimic headers (Anti-Detection)
+function applyMimicHeaders(headers) {
+  const h = headers instanceof Headers ? headers : new Headers(headers);
+  if (!h.has("x-freebuff-sdk-version")) h.set("x-freebuff-sdk-version", "0.0.141");
+  if (!h.has("x-freebuff-client-type")) h.set("x-freebuff-client-type", "cli");
+  if (!h.has("x-freebuff-ide-type")) h.set("x-freebuff-ide-type", "cli");
+  if (!h.has("User-Agent")) {
+    h.set("User-Agent", "codebuff-cli/1.0.685");
+  }
+  if (!h.has("Accept")) h.set("Accept", "application/json, text/plain, */*");
+  if (!h.has("Accept-Language")) h.set("Accept-Language", "en-US,en;q=0.9");
+  return headers instanceof Headers ? h : Object.fromEntries(h.entries());
+}
+
 // Resolve upstream URL: if RELAY_URL is set, route through relay (inject relay headers)
 function resolveUpstream(path, extraHeaders = {}) {
-  if (RELAY_URL) {
-    const relayHeaders = { ...extraHeaders };
+  const currentRelay = getRelayUrl();
+  const baseHeaders = applyMimicHeaders(extraHeaders);
+  if (currentRelay) {
+    const relayHeaders = { ...baseHeaders };
     relayHeaders["x-relay-target"] = CODEBUFF_API;
     relayHeaders["x-relay-path"] = path;
-    return [RELAY_URL, relayHeaders];
+    return [currentRelay, relayHeaders];
   }
-  return [CODEBUFF_API + path, extraHeaders];
+  return [CODEBUFF_API + path, baseHeaders];
 }
 
 // Resolve direct chat fetch URL (for streaming, which bypasses up())
 function resolveChatUrl(path, headers) {
-  if (RELAY_URL) {
-    const h = new Headers(headers);
+  const currentRelay = getRelayUrl();
+  const h = new Headers(headers);
+  applyMimicHeaders(h);
+  if (currentRelay) {
     h.set("x-relay-target", CODEBUFF_API);
     h.set("x-relay-path", path);
-    return [RELAY_URL, h];
+    return [currentRelay, h];
   }
-  return [CODEBUFF_API + path, headers];
+  return [CODEBUFF_API + path, h];
 }
 
 async function up(method, path, token, body, extraHeaders = {}, timeoutMs = UPSTREAM_TIMEOUT_MS) {
@@ -884,22 +936,20 @@ function behaviorDue(key) {
   return false;
 }
 
-// Stable fingerprint: derived from token, always consistent per account (official enhanced- prefix + hash)
-// CF Workers lack synchronous WebCrypto, use lightweight deterministic hash (FNV-1a dual seed + hex)
+// Stable fingerprint: derived from token, always consistent per account (official codebuff-cli- prefix)
 function stableFingerprint(token) {
   let h1 = 0x811c9dc5, h2 = 0x01000193;
-  const s = "freebuff-fp-v2:" + token;
+  const s = "codebuff-fp-v3:" + token;
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
     h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
     h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
   }
-  return "enhanced-" + h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+  return "codebuff-cli-" + (h1 ^ h2).toString(16).padStart(8, "0");
 }
 
 // Ad chain: POST /ads to fetch → if impUrl exists, POST /ads/impression for impression reporting.
-// Official implementation: getCliAdRequestUserAgent sends Freebuff-CLI/<version> UA;
-// body {provider:"gravity", surface, sessionId, device, userAgent}; impression {impUrl, mode}
+// Matches official codebuff-cli device metadata & timezone
 async function runNormalClientBehavior(token, clientFingerprint) {
   const failures = [];
   // 1) Ad fetch + impression (every 30 min, avoid hitting ad API per request)
@@ -909,14 +959,14 @@ async function runNormalClientBehavior(token, clientFingerprint) {
         provider: "gravity",
         sessionId: crypto.randomUUID(),
         surface: "waiting_room",
-        device: { os: "macos", timezone: "Asia/Shanghai", locale: "zh-CN" },
-        userAgent: "Freebuff-CLI/0.0.138",
-      }, { "User-Agent": "Freebuff-CLI/0.0.138", "Content-Type": "application/json" }, 6000);
+        device: { os: "linux", timezone: "America/Los_Angeles", locale: "en-US" },
+        userAgent: "codebuff-cli/1.0.685",
+      }, { "User-Agent": "codebuff-cli/1.0.685", "Content-Type": "application/json" }, 6000);
       const impUrl = ad.data && Array.isArray(ad.data.ads) && ad.data.ads[0] && ad.data.ads[0].impUrl;
       if (ad.status === 200 && impUrl) {
         await enqueueUp("POST", "/api/v1/ads/impression", token,
           { impUrl, mode: "free" },
-          { "User-Agent": "Freebuff-CLI/0.0.138", "Content-Type": "application/json" }, 6000);
+          { "User-Agent": "codebuff-cli/1.0.685", "Content-Type": "application/json" }, 6000);
       }
     } catch (e) { failures.push("ads:" + String(e && e.message || e).slice(0, 80)); }
   }
@@ -925,7 +975,7 @@ async function runNormalClientBehavior(token, clientFingerprint) {
     try {
       await enqueueUp("POST", "/api/v1/usage", token,
         { fingerprintId: clientFingerprint },
-        { "Content-Type": "application/json" }, 6000);
+        { "Content-Type": "application/json", "User-Agent": "codebuff-cli/1.0.685" }, 6000);
     } catch (e) { failures.push("usage:" + String(e && e.message || e).slice(0, 80)); }
   }
   return failures;
@@ -999,6 +1049,11 @@ async function createSession(token, sessionModel, forceCreate = false) {
       }
     }
     throw new Error("session stayed queued (retry later)");
+  }
+  if (r.status === 429 || (r.text || "").includes("spend_limited") || (r.text || "").includes("rate_limited")) {
+    const cdMs = parseCooldown(r.text || JSON.stringify(r.data), 429);
+    cooldown(token, cdMs);
+    throw new Error(`account_rate_limited: 429 (cooldown ${(cdMs/1000/60).toFixed(1)}m) ${r.text || ""}`);
   }
   if (r.status === 409) throw new Error("session_model_mismatch: " + String(r.data?.message || r.data?.error || "upstream rejected this model"));
   throw new Error("create session failed: " + r.status + " " + (r.text || "").slice(0, 300));
@@ -1504,12 +1559,35 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         }
         if (resp.ok) {
           recordAccountObservation(token, resp.status, null);
+          // Empty/near-empty success body is a transient upstream hiccup:
+          // retry once with a rebuilt session instead of returning garbage.
+          if (!isStream) {
+            const rawBody = await resp.text();
+            if (!rawBody || rawBody.trim().length < 2) {
+              if (attempt === 0) {
+                await deleteUpstreamSession(token, sessForChat.instanceId);
+                if (debug) console.log(`[acct ${acctTry + 1}][chat] empty body, retry once`);
+                sessForChat = await createSession(token, mc.session, true);
+                continue;
+              }
+              errText = "upstream returned empty body";
+              resp = { ok: false, status: 502, text: async () => errText };
+              break;
+            }
+            // Rewrap so downstream (streamToNonStream) sees the original body
+            resp = new Response(rawBody, { status: 200, headers: { "Content-Type": "application/json" } });
+          }
           break;
         }
         errText = await resp.text();
         recordAccountObservation(token, resp.status, errText);
-        // 428 waiting_room_required (no active session) / 409 session_superseded (replaced by a new session)
-        // both indicate the cached instance is stale → clear cache, force rebuild, and retry once; not rate limiting, no cooldown
+        // 429 Rate Limit / Spend Limit Guard: IMMEDIATELY cooldown and break without retrying
+        if (resp.status === 429 || errText.includes("spend_limited") || errText.includes("rate_limited")) {
+          const cdMs = parseCooldown(errText, 429, resp.headers);
+          cooldown(token, cdMs);
+          if (debug) console.log(`[acct ${acctTry + 1}][chat] 429 rate limit hit, cooldown ${(cdMs/1000/60).toFixed(1)}m. Switching account immediately...`);
+          break;
+        }
         const staleSession =
           isStaleSessionGate(resp.status, errText) ||
           // Older upstream wrappers returned model mismatch as HTTP 502.
@@ -1517,6 +1595,16 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         if (staleSession && attempt === 0) {
           await deleteUpstreamSession(token, sessForChat.instanceId);
           if (debug) console.log(`[acct ${acctTry + 1}][chat] session stale (${resp.status}), recreate…`);
+          sessForChat = await createSession(token, mc.session, true);
+          continue;
+        }
+        // Generic 502/504 (transient upstream gateway errors) — rebuild session and retry once
+        // before giving up on this account, instead of immediately switching.
+        if ((resp.status === 502 || resp.status === 504) && attempt === 0 && !staleSession) {
+          if (debug) console.log(`[acct ${acctTry + 1}][chat] upstream ${resp.status}, rebuild + retry once`);
+          try {
+            await deleteUpstreamSession(token, sessForChat.instanceId);
+          } catch (e) {}
           sessForChat = await createSession(token, mc.session, true);
           continue;
         }
@@ -1797,6 +1885,8 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
   const reader = upstreamBody.getReader();
   const decoder = new TextDecoder();
   let buf = "", content = "", reasoning = "", finishReason = null, model = "", id = "", usage = null;
+  const toolCallsMap = new Map(); // index -> { id, type: "function", function: { name, arguments } }
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -1814,6 +1904,29 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
         const delta = choice.delta || {};
         if (delta.content) content += delta.content;
         if (delta.reasoning_content) reasoning += delta.reasoning_content;
+
+        // Aggregate tool_calls delta chunks
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const tcIdx = tc.index ?? toolCallsMap.size;
+            if (!toolCallsMap.has(tcIdx)) {
+              toolCallsMap.set(tcIdx, {
+                id: tc.id || ("call_" + Math.random().toString(36).slice(2, 10)),
+                type: tc.type || "function",
+                function: {
+                  name: tc.function?.name || "",
+                  arguments: tc.function?.arguments || ""
+                }
+              });
+            } else {
+              const cur = toolCallsMap.get(tcIdx);
+              if (tc.id) cur.id = tc.id;
+              if (tc.function?.name) cur.function.name += tc.function.name;
+              if (tc.function?.arguments) cur.function.arguments += tc.function.arguments;
+            }
+          }
+        }
+
         if (choice.finish_reason) finishReason = choice.finish_reason;
         if (obj.id) id = obj.id;
         if (obj.model) model = obj.model;
@@ -1821,9 +1934,18 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
       } catch {}
     }
   }
-  const msg = { role: "assistant", content };
-  if (reasoning && !content) { msg.content = reasoning; msg.reasoning_used_as_content = true; }
-  else if (reasoning) msg.reasoning_content = reasoning;
+
+  const tool_calls = Array.from(toolCallsMap.values()).filter(t => t.function.name.length > 0);
+  const msg = { role: "assistant", content: content || null };
+  if (reasoning) msg.reasoning_content = reasoning;
+  if (tool_calls.length > 0) {
+    msg.tool_calls = tool_calls;
+    if (!finishReason || finishReason === "stop") finishReason = "tool_calls";
+  } else if (reasoning && !content) {
+    msg.content = reasoning;
+    msg.reasoning_used_as_content = true;
+  }
+
   return {
     id: id || "gen_" + Date.now(),
     object: "chat.completion",
@@ -2127,6 +2249,68 @@ function cleanCache() {
       }
     }
   } catch {}
+}
+
+async function handleAccountStatus(env) {
+  const pool = parseAccounts(env);
+  if (pool.length === 0) {
+    return jsonResponse({ error: "No accounts configured in FREEBUFF_TOKEN", accounts: [] }, 200);
+  }
+
+  const results = [];
+  for (let i = 0; i < pool.length; i++) {
+    const acct = pool[i];
+    const token = acct.token;
+    const masked = token.slice(0, 8) + "..." + token.slice(-4);
+    const cd = cooldowns.get(token) || 0;
+    const isCooldown = cd > Date.now();
+    const cdRemainingSec = isCooldown ? Math.round((cd - Date.now()) / 1000) : 0;
+
+    let tier = "unknown";
+    let status = "unknown";
+    let poolLabel = "";
+    let rateLimit = null;
+
+    try {
+      const [fetchUrl, fetchHeaders] = resolveUpstream("/api/v1/freebuff/session", {
+        Authorization: "Bearer " + token,
+        "x-freebuff-include-unused-rate-limits": "true"
+      });
+      const r = await fetch(fetchUrl, { headers: fetchHeaders });
+      if (r.ok) {
+        const data = await r.json();
+        tier = data.accessTier || data.tier || "standard";
+        status = data.status || "ready";
+        rateLimit = data.rateLimit || null;
+        poolLabel = rateLimit?.poolLabel || "";
+      } else {
+        status = `http_${r.status}`;
+      }
+    } catch (e) {
+      status = "network_error: " + (e.message || e);
+    }
+
+    results.push({
+      slot: `${i + 1}/${pool.length}`,
+      token: masked,
+      accessTier: tier,
+      status: status,
+      pool: poolLabel,
+      rateLimit: rateLimit,
+      inCooldown: isCooldown,
+      cooldownRemainingSeconds: cdRemainingSec
+    });
+  }
+
+  const fullCount = results.filter(a => a.accessTier === "full").length;
+  return jsonResponse({
+    summary: {
+      total_accounts: pool.length,
+      full_tier_accounts: fullCount,
+      active_rate_limited: results.filter(a => a.inCooldown).length
+    },
+    accounts: results
+  }, 200, { "X-Freebuff2api-Version": VERSION });
 }
 
 // /v1/models returns hardcoded MODELS + dynamic official list (merged, deduplicated)

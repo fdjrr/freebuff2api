@@ -1,9 +1,9 @@
 {
-  "name": "freebuff2api-container",
+  "name": "freebuff2api",
   "version": "1.7.0",
   "type": "module",
   "private": true,
-  "description": "freebuff2api-wokers v1.6.5 worker.js running in Node container",
+  "description": "freebuff2api running in Node container",
   "scripts": {
     "start": "node server.js"
   },
