@@ -95,11 +95,6 @@ function parseAgentMappings(source, modelIdConstants) {
   return result;
 }
 
-// Compatible with: 'string' | identifier.member (extract member name, look up in knownDefaults) | identifier
-function parseAgentMapping(source, modelIdConstants) {
-  return parseAgentMappings(source, modelIdConstants).root;
-}
-
 // Parse pool definitions from freebuff-models.ts (PREMIUM / GLM; STANDARD derived from non-premium)
 // FREEBUFF_WEB_PREMIUM_MODEL_IDS includes spread(...FREEBUFF_PREMIUM_MODEL_IDS)
 function parseModelPools(source, modelIdConstants) {
@@ -489,6 +484,10 @@ function recordAccountObservation(token, status, dataOrText, extra = {}) {
     uid: extra.uid || previous.uid || null,
     quota: extra.quota || previous.quota || null,
     retryAfterMs: typeof extra.retryAfterMs === "number" ? extra.retryAfterMs : previous.retryAfterMs || null,
+    // Tier/pool come from the upstream session payload (accessTier/tier, rateLimit.poolLabel).
+    // Chat-only observations (data = null) preserve the last known values.
+    tier: extra.tier || (data?.accessTier || data?.tier) || previous.tier || null,
+    poolLabel: extra.poolLabel || data?.rateLimit?.poolLabel || data?.poolLabel || previous.poolLabel || null,
     checkedAt: Date.now(),
   });
 }
@@ -594,10 +593,10 @@ function accountSlot(pool, token) {
   return index >= 0 ? `${index + 1}/${pool.length}` : `?/${pool.length}`;
 }
 
-function logAccountRoute(enabled, pool, token, model, attempt, reason) {
+function logAccountRoute(enabled, pool, token, model, attempt, reason, outcome) {
   if (!enabled) return;
   try {
-    console.log(JSON.stringify({ event: "account_route", model, account_slot: accountSlot(pool, token), attempt, reason }));
+    console.log(JSON.stringify({ event: "account_route", model, account_slot: accountSlot(pool, token), attempt, reason, outcome }));
   } catch {}
 }
 
@@ -627,27 +626,6 @@ function isStaleSessionGate(status, body) {
   try { parsed = JSON.parse(body); } catch {}
   return Object.entries(SESSION_GATE_RECOVERY).some(([code, expectedStatus]) =>
     status === expectedStatus && hasExactErrorCode(parsed, code));
-}
-
-// Only used to confirm Premium quota exhaustion when streaming has no initial data; does not affect account round-robin ordering.
-function remainingQuota(token, sessionModel) {
-  if (modelPoolCategory(sessionModel) === "standard") return null;
-  const h = acctHealth.get(token);
-  if (!h || !h.quota) return null;
-  let entry = h.quota[sessionModel];
-  if (!entry && modelPoolCategory(sessionModel) === "premium") {
-    const premiumPool = (dynamicModelsCache.pool && dynamicModelsCache.pool.premium)
-      ? dynamicModelsCache.pool.premium
-      : PREMIUM_QUOTA_MODELS;
-    for (const model of premiumPool) {
-      if (h.quota[model]) {
-        entry = h.quota[model];
-        break;
-      }
-    }
-  }
-  if (!entry || typeof entry.recentCount !== "number" || typeof entry.limit !== "number") return null;
-  return entry.limit - entry.recentCount;
 }
 
 // Long streams should not be killed by a fixed timeout: only when upstream quota probing explicitly indicates exhaustion,
@@ -723,6 +701,16 @@ class EmptyUpstreamStreamError extends Error {
   }
 }
 
+// Model-level rejection (e.g. limited-access account cannot create a premium-model session).
+// Not an account-level failure: every account in the pool fails identically for the same model,
+// so executeChat fails fast instead of burning the pool with pointless 60s cooldowns.
+class SessionModelMismatchError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SessionModelMismatchError";
+  }
+}
+
 function invalidateSessionCache(token) {
   const prefix = token + ":";
   for (const key of sessCache.keys()) {
@@ -759,6 +747,10 @@ const SESSION_TIMEOUT_MS = 10000;  // session/run short interactions fail faster
 // Not a streaming request failure timeout — only an observation window for triggering a quota probe when the first data is delayed.
 // Do not abort or switch accounts while quota is still available; keep waiting for upstream.
 const STREAM_NO_DATA_PROBE_DELAY_MS = 20000;
+// Idle streaming timeout: once the first byte has arrived, abort only if NO data flows for this long.
+// Long-reasoning streams (e.g. v4-pro effort=high) legitimately pause between chunks — a fixed total
+// timeout would kill them. 120s of total silence is a hung upstream, not a thinking model.
+const STREAM_IDLE_TIMEOUT_MS = 120000;
 
 let relayIdx = 0;
 function getRelayUrl() {
@@ -881,26 +873,43 @@ async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
       throw new EmptyUpstreamStreamError();
     }
 
-    // First chunk has arrived; hand off to normal SSE forwarding logic; no more fixed total timeout.
+    // First chunk has arrived; hand off to normal SSE forwarding logic. No fixed total timeout —
+    // but a hung upstream must not hold the client connection forever: abort after a long silence.
+    let idleTimer = null;
+    const armIdle = () => {
+      idleTimer = setTimeout(() => {
+        try { controller.abort(); } catch {}
+        // Let the read loop observe the abort and surface it as a stream error.
+        try { reader.cancel("stream idle timeout"); } catch {}
+      }, STREAM_IDLE_TIMEOUT_MS);
+    };
+    const clearIdle = () => {
+      if (idleTimer !== null) { clearTimeout(idleTimer); idleTimer = null; }
+    };
     const body = new ReadableStream({
       start(streamController) {
         streamController.enqueue(first.value);
+        armIdle();
         (async () => {
           try {
             while (true) {
               const next = await reader.read();
               if (next.done) break;
+              clearIdle();
               streamController.enqueue(next.value);
+              armIdle();
             }
+            clearIdle();
             streamController.close();
           } catch (error) {
             streamController.error(error);
           } finally {
+            clearIdle();
             try { reader.releaseLock(); } catch {}
           }
         })();
       },
-      cancel(reason) { return reader.cancel(reason); },
+      cancel(reason) { clearIdle(); return reader.cancel(reason); },
     });
     return new Response(body, { status: response.status, headers: response.headers });
   } catch (error) {
@@ -1055,7 +1064,13 @@ async function createSession(token, sessionModel, forceCreate = false) {
     cooldown(token, cdMs);
     throw new Error(`account_rate_limited: 429 (cooldown ${(cdMs/1000/60).toFixed(1)}m) ${r.text || ""}`);
   }
-  if (r.status === 409) throw new Error("session_model_mismatch: " + String(r.data?.message || r.data?.error || "upstream rejected this model"));
+  // 409 session_model_mismatch = model-level rejection (tier/permission), not account failure.
+  // Fail fast: don't retry other accounts for a model the upstream rejects for all of them.
+  const mismatchMsg = String(r.data?.message || r.data?.error || "upstream rejected this model").replace(/^session_model_mismatch:\s*/, "");
+  if (r.status === 409 && (r.text || "").includes("session_model_mismatch")) {
+    throw new SessionModelMismatchError("session_model_mismatch: " + mismatchMsg);
+  }
+  if (r.status === 409) throw new Error("session_model_mismatch: " + mismatchMsg);
   throw new Error("create session failed: " + r.status + " " + (r.text || "").slice(0, 300));
 }
 
@@ -1429,8 +1444,10 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
     const acct = pickToken(env, mc.session);
     const token = acct ? acct.token : null;
     if (!token) break;
-    logAccountRoute(debug, pool, token, mc.session, acctTry + 1,
-      isUsableSession(sessCache.get(token + ":" + mc.session)) ? "active_session" : "quota_or_round_robin");
+    const attemptNum = acctTry + 1;
+    const routeReason = isUsableSession(sessCache.get(token + ":" + mc.session))
+      ? "active_session"
+      : (cooldowns.has(token) && cooldowns.get(token) > Date.now()) ? "cooldown" : "quota_or_round_robin";
     let rootRunId = null;
     let reviewerRunId = null;
     try {
@@ -1439,7 +1456,7 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
       rootRunId = root.runId;
       // Desktop protocol key: reviewer is a child run of the root run.
       reviewerRunId = await startRun(token, reviewerAgent, [rootRunId]);
-      if (debug) console.log(`[review][acct ${acctTry + 1}] root=${rootRunId} reviewer=${reviewerRunId} model=${reviewerModel}`);
+      if (debug) console.log(`[review][acct ${attemptNum}] root=${rootRunId} reviewer=${reviewerRunId} model=${reviewerModel}`);
 
       const payload = buildReviewerPayload(chatParams, { ...mc, upstream: reviewerModel }, sess, reviewerRunId);
       const resp = await fetch(...resolveChatUrl("/api/v1/chat/completions", {
@@ -1471,6 +1488,7 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
         const { readable, writable } = new TransformStream();
         if (mode === "responses") pipeUpstreamToResponsesStream(resp.body, writable, mc, finalize);
         else pipeUpstreamToClient(resp.body, writable, finalize);
+        logAccountRoute(debug, pool, token, mc.session, attemptNum, routeReason, "ok");
         return new Response(readable, {
           status: 200,
           headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...corsHeaders() },
@@ -1481,12 +1499,19 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
         ? await responsesToNonStream(resp.body, mc)
         : await streamToNonStream(resp.body, reviewerModel);
       await finalize();
+      logAccountRoute(debug, pool, token, mc.session, attemptNum, routeReason, "ok");
       return mode === "responses" ? jsonResponse(result, 200) : jsonResponse(result, 200);
     } catch (e) {
       console.error("[code_review]", e);
       lastErrMsg = String(e.message || e);
       if (reviewerRunId) await finishRun(token, reviewerRunId, 1).catch(() => {});
       if (rootRunId) await finishRun(token, rootRunId, 1).catch(() => {});
+      // Model-level rejection: no account in the pool can host this model's reviewer — fail fast.
+      if (e instanceof SessionModelMismatchError) {
+        logAccountRoute(debug, pool, token, mc.session, attemptNum, routeReason, "fail_fast_model_mismatch");
+        break;
+      }
+      logAccountRoute(debug, pool, token, mc.session, attemptNum, routeReason, "exception");
       if (/start_run failed|timeout|timed out|abort|reviewer upstream/i.test(lastErrMsg)) cooldown(token, 60 * 1000);
     }
   }
@@ -1507,12 +1532,17 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
     const acct = pickToken(env, mc.session);
     const token = acct ? acct.token : null;
     if (!token) break;
-    logAccountRoute(debug, pool, token, mc.session, acctTry + 1,
-      isUsableSession(sessCache.get(token + ":" + mc.session)) ? "active_session" : "quota_or_round_robin");
+    // Log the route decision once per attempt, at the END, with the actual outcome.
+    // Logging before createSession would announce an account that may immediately fail,
+    // and the attempt counter already reflects the round-robin position.
+    const attemptNum = acctTry + 1;
+    const routeReason = isUsableSession(sessCache.get(token + ":" + mc.session))
+      ? "active_session"
+      : (cooldowns.has(token) && cooldowns.get(token) > Date.now()) ? "cooldown" : "quota_or_round_robin";
     try {
       // 1) session
       const sess = await createSession(token, mc.session);
-      if (debug) console.log(`[acct ${acctTry + 1}] session=${sess.instanceId}`);
+      if (debug) console.log(`[acct ${attemptNum}] session=${sess.instanceId}`);
 
       // 2) run chain
       const run = await startRunChain(token, mc.agent);
@@ -1581,6 +1611,11 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         }
         errText = await resp.text();
         recordAccountObservation(token, resp.status, errText);
+        // Model-level rejection wrapped as 502 by older upstream wrappers: fail fast (no cooldown,
+        // no rebuild, no switch) — the model is rejected for every account.
+        if (resp.status === 502 && (errText.includes("session_model_mismatch") || errText.includes("not valid for limited access"))) {
+          throw new SessionModelMismatchError("session_model_mismatch: " + errText.slice(0, 300));
+        }
         // 429 Rate Limit / Spend Limit Guard: IMMEDIATELY cooldown and break without retrying
         if (resp.status === 429 || errText.includes("spend_limited") || errText.includes("rate_limited")) {
           const cdMs = parseCooldown(errText, 429, resp.headers);
@@ -1588,10 +1623,10 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
           if (debug) console.log(`[acct ${acctTry + 1}][chat] 429 rate limit hit, cooldown ${(cdMs/1000/60).toFixed(1)}m. Switching account immediately...`);
           break;
         }
-        const staleSession =
-          isStaleSessionGate(resp.status, errText) ||
-          // Older upstream wrappers returned model mismatch as HTTP 502.
-          (resp.status === 502 && (errText.includes("session_model_mismatch") || errText.includes("not valid for limited access")));
+        // NOTE: older upstream wrappers returning model mismatch as HTTP 502 are already
+        // thrown as SessionModelMismatchError above (fail fast), so 502-mismatch never reaches
+        // the stale-session rebuild branch — that case must not silently rebuild the session.
+        const staleSession = isStaleSessionGate(resp.status, errText);
         if (staleSession && attempt === 0) {
           await deleteUpstreamSession(token, sessForChat.instanceId);
           if (debug) console.log(`[acct ${acctTry + 1}][chat] session stale (${resp.status}), recreate…`);
@@ -1615,9 +1650,11 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
       }
       if (!resp.ok) {
         lastErrMsg = "upstream error: " + (errText || "").slice(0, 300);
-        if (debug) console.log(`[acct ${acctTry + 1}] failed ${resp.status}, switch account`);
+        if (debug) console.log(`[acct ${attemptNum}] failed ${resp.status}, switch account`);
+        logAccountRoute(debug, pool, token, mc.session, attemptNum, routeReason, "failed:" + resp.status);
         continue;
       }
+      logAccountRoute(debug, pool, token, mc.session, attemptNum, routeReason, "ok");
 
       if (isStream) {
         const { readable, writable } = new TransformStream();
@@ -1633,6 +1670,14 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
     } catch (e) {
       console.error("[" + mode + "]", e);
       const msg = String(e.message || e);
+      // Model-level rejection (session_model_mismatch): every account fails identically for this
+      // model, so don't cooldown accounts or burn the pool — fail fast with a clear error.
+      if (e instanceof SessionModelMismatchError) {
+        lastErrMsg = msg;
+        if (debug) console.log(`[acct ${attemptNum}] model rejected for this account tier, fail fast`);
+        logAccountRoute(debug, pool, token, mc.session, attemptNum, routeReason, "fail_fast_model_mismatch");
+        break;
+      }
       // Quota probe confirmed exhaustion: clear current model session, cool down per upstream retryAfterMs, then switch accounts.
       if (e instanceof QuotaExhaustedError) {
         sessCache.delete(token + ":" + mc.session);
@@ -1648,7 +1693,8 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         cooldown(token, m429 ? parseCooldown(msg, 429) : 60 * 1000);
       }
       lastErrMsg = msg;
-      if (debug) console.log(`[acct ${acctTry + 1}] exception: ${msg.slice(0, 120)}, switch account`);
+      if (debug) console.log(`[acct ${attemptNum}] exception: ${msg.slice(0, 120)}, switch account`);
+      logAccountRoute(debug, pool, token, mc.session, attemptNum, routeReason, "exception");
     }
   }
   return jsonResponse({ error: { message: lastErrMsg, type: "api_error" } }, 502);
@@ -2266,37 +2312,20 @@ async function handleAccountStatus(env) {
     const isCooldown = cd > Date.now();
     const cdRemainingSec = isCooldown ? Math.round((cd - Date.now()) / 1000) : 0;
 
-    let tier = "unknown";
-    let status = "unknown";
-    let poolLabel = "";
-    let rateLimit = null;
-
-    try {
-      const [fetchUrl, fetchHeaders] = resolveUpstream("/api/v1/freebuff/session", {
-        Authorization: "Bearer " + token,
-        "x-freebuff-include-unused-rate-limits": "true"
-      });
-      const r = await fetch(fetchUrl, { headers: fetchHeaders });
-      if (r.ok) {
-        const data = await r.json();
-        tier = data.accessTier || data.tier || "standard";
-        status = data.status || "ready";
-        rateLimit = data.rateLimit || null;
-        poolLabel = rateLimit?.poolLabel || "";
-      } else {
-        status = `http_${r.status}`;
-      }
-    } catch (e) {
-      status = "network_error: " + (e.message || e);
-    }
+    // Cache-only view: never probe the upstream here. A GET /api/v1/freebuff/session would
+    // occupy the account's single session slot and disrupt any ongoing chat (428 waiting_room_required).
+    // This mirrors the rule documented on /v1/models — report only what real traffic has observed.
+    const info = acctHealth.get(token) || {};
+    const observedAgoMs = info.checkedAt ? Date.now() - info.checkedAt : null;
 
     results.push({
       slot: `${i + 1}/${pool.length}`,
       token: masked,
-      accessTier: tier,
-      status: status,
-      pool: poolLabel,
-      rateLimit: rateLimit,
+      accessTier: info.tier || info.accessTier || "unknown",
+      status: info.alive === true ? "ok" : info.state || "unknown",
+      pool: info.poolLabel || "",
+      rateLimit: info.quota || null,
+      observedMsAgo: observedAgoMs,
       inCooldown: isCooldown,
       cooldownRemainingSeconds: cdRemainingSec
     });

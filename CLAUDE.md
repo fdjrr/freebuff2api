@@ -98,7 +98,7 @@ Three upstream quota pools (from Freebuff's `freebuff-models.ts`):
 | Env Var | Description |
 |---|---|
 | `FREEBUFF_TOKEN` | API tokens, comma/newline separated (Docker: `credentials/*.json`) |
-| `FREEBUFF_API_KEY` | Custom API key for clients (default: `freebuff-default-key`) |
+| `FREEBUFF_API_KEY` | Custom API key for clients (default: `freebuff-default-key`). `API_KEY` is accepted as a fallback alias. Clients authenticate with `Authorization: Bearer <key>` **or** the `x-api-key` header (`getApiKey()`). |
 | `FREEBUFF_DEBUG` | `true` for per-request debug logging |
 | `CODEBUFF_API` | Upstream URL override (default: `https://www.codebuff.com`) |
 | `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all upstream traffic through relay |

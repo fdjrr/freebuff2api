@@ -76,13 +76,13 @@ After deployment, use (**no API key required**):
 
 ```bash
 curl https://your-worker.workers.dev/health
-# {"status":"ok","version":"1.4.0","time":"..."}
+# {"status":"ok","version":"1.8.9","time":"..."}
 ```
 
 - The `version` field shows the current deployed version — **it changes with every deployment**, useful for verifying whether the latest update is live (CF edge cache has a delay; wait a few seconds or add a random parameter when checking)
 - Suitable for UptimeRobot / self-hosted monitoring
 
-For authenticated account details, use `GET /v1/accounts` (or `/accounts`). It reports masked tokens, access tiers, pool/rate-limit metadata, and local cooldown state; full tokens are never returned. This endpoint may actively query upstream account status, so it should not be used as a high-frequency monitoring probe.
+For authenticated account details, use `GET /v1/accounts` (or `/accounts`). It reports masked tokens, access tiers, pool/rate-limit metadata, local cooldown state, and observation recency; full tokens are never returned. This endpoint is **cache-only** — it never queries the upstream. Account health is observed passively from real chat traffic, so a fresh account with no chat history will show `status: "unknown"` until it handles its first request.
 
 ## 🔑 Obtaining FREEBUFF_TOKEN
 
@@ -131,7 +131,7 @@ After startup, the service listens on `0.0.0.0:8787` (compose maps to host port 
 | Variable | Description |
 |---|---|
 | `PORT` / `HOST` | Listen port/address, defaults to `8787` / `0.0.0.0` |
-| `FREEBUFF_API_KEY` | API access key (defaults to `freebuff-default-key`) |
+| `FREEBUFF_API_KEY` | API access key (defaults to `freebuff-default-key`). Also accepts `API_KEY` as a fallback alias. Clients authenticate via `Authorization: Bearer <key>` **or** `x-api-key: <key>` header. |
 | `FREEBUFF_DEBUG` | Set to `true` to enable per-request debug logging |
 | `CODEBUFF_API` | Upstream address; empty = direct to `https://www.codebuff.com`; set to a relay domain when using a self-hosted relay |
 | `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all traffic through relay |
@@ -167,7 +167,7 @@ The simplest and most controllable approach — no local environment needed, no 
    ```
 
 > Each time you modify the code, repeat step 3: edit code → paste new content → deploy. **Linking to GitHub for auto-deployment is not recommended** (see below).
-> ⚠️ **Version Convention**: Before each deployment, bump the version number (in the health `version` field + `X-Freebuff2api-Version` response header) so you can confirm whether the update is live.
+> ⚠️ **Version Convention**: The single source of truth is `VERSION` at the top of [worker.js](worker.js) — it drives the health `version` field and the `X-Freebuff2api-Version` response header. Before each deployment, bump `VERSION` in `worker.js` (and optionally the image tag in `docker-compose.yml` / `package.json`) so you can confirm whether the update is live. The README examples below show the version current at the time of writing.
 
 ### GitHub Auto-Deployment (❌ Not Recommended)
 
