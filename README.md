@@ -59,7 +59,7 @@ Apart from these two special models, all regular models are understood to have a
 
 ## 🚀 Quick Start
 
-1. Obtain a freebuff token (see "[Obtaining FREEBUFF_TOKEN](#-obtaining-freebuff_token)" below)
+1. Obtain a freebuff token (see "[Providing FREEBUFF_TOKEN](#-providing-freebuff_token)" below)
 2. Deploy the service (see "[Deployment](#-deployment)" below — **Docker container deployment recommended**)
 3. Configure environment variables:
    - `FREEBUFF_TOKEN` (required) = your token
@@ -86,50 +86,16 @@ For authenticated account details, use `GET /v1/accounts` (or `/accounts`). It r
 
 ## 🔑 Obtaining FREEBUFF_TOKEN
 
-The freebuff auth token is obtained via the same **authorization code polling** mechanism used by the official CLI. The project includes an extraction tool at `tools/extract.py`, with an interactive flow identical to `cline_oauth.py`.
+> The freebuff auth token is normally obtained via the official client's **authorization code polling** flow (generate a device fingerprint → `POST /api/auth/cli/code` for a login URL → authorize in the browser → poll `/api/auth/cli/status` to receive the user object with its `authToken`). Bring your own token from the client, an external extractor, or any workflow you maintain yourself.
 
-### Method A: GitHub Actions Workflow (Recommended, Remote Extraction)
+### Where the token goes
 
-The repository includes a workflow at `.github/workflows/extract-token.yml` that runs extraction in GitHub Actions. The authorization link and token are sent only to your Telegram — all logs are masked (`::add-mask::`), ensuring no sensitive information is leaked.
-
-**Step 1: Configure Secrets** (repo Settings → Secrets and variables → Actions):
-
-| Secret | Description |
+| Deployment | How to provide the token |
 |---|---|
-| `TG_BOT_TOKEN` | Telegram bot token (create one via @BotFather, e.g. `123456:ABC-xxx`) |
-| `TG_CHAT_ID` | Your Telegram numeric chat ID (message @userinfobot to get it) |
+| Docker / Node (`server.js`) | Drop one JSON file per account in `credentials/` — each file's `authToken` field is loaded (`{"email": "...", "authToken": "...", "name": "..."}`). A raw `FREEBUFF_TOKEN` env var is also supported and merged in. |
+| Cloudflare Worker (not recommended) | Set `FREEBUFF_TOKEN` as a Worker Secret (comma-separated for multiple accounts). |
 
-**Step 2: Run the Workflow**:
-
-1. Repository page → **Actions** → **Get Freebuff authToken** → **Run workflow**
-2. Optionally fill in `poll_timeout` (authorization wait time in seconds, default 300) and `fingerprint` (leave blank for auto-generation)
-3. You'll receive a login link on Telegram — open it in a browser and log in with your Google account
-4. Once the script polls the token, the full token is sent directly to your Telegram (the Actions logs only show `***`)
-5. After completion, old run records are automatically cleaned up — only the latest 1 run is kept
-
-> If `TG_BOT_TOKEN` / `TG_CHAT_ID` are not configured, the workflow will fail immediately on the first step without executing the extraction.
-
-### Method B: Local Extraction
-
-```bash
-cd tools
-python3 extract.py login   # Prints the authorization URL to the terminal — authorize in browser, then auto-poll
-python3 extract.py show    # Displays all accounts: email + token + status + summary, one per line
-python3 extract.py tgsend  # Test Telegram connectivity (when TG is configured)
-```
-
-When running `login` locally, each account is **appended with a separate key** to `tools/freebuff_credentials.json` (does not overwrite existing accounts, supports Google / GitHub login, both auto-recorded). This file is covered by `.gitignore` and will not be committed to GitHub. See `tools/freebuff_credentials.example.json` for the structure.
-
-Other useful commands:
-
-```bash
-python3 extract.py export           # Summarize all account tokens, one per line — ready to copy into CF Workers variables
-python3 extract.py quota            # Check usage
-python3 extract.py session          # Create / check sessions
-python3 extract.py chat "Hello"     # Send a test message to the model API
-```
-
-> 💡 `show` internally uses `GET /api/v1/freebuff/session` to probe each account (**no session created, zero cost**), displaying all statuses at once: active + quota / token expired / banned / region-restricted / quota exhausted. For banned accounts, the official API returns `status: banned` on all endpoints. With multiple accounts, `export` outputs each token on a separate line — paste them directly into the Cloudflare Worker variable `FREEBUFF_TOKEN` (newline-separated).
+> 💡 **Multiple accounts**: separate tokens with commas (`token1,token2`) or, for Docker, add more JSON files under `credentials/`. Flat-token separation is a plain line split on commas **and** newlines, so newline-separated values work too.
 
 ## 🛠️ Deployment
 
@@ -208,9 +174,9 @@ The simplest and most controllable approach — no local environment needed, no 
 While CF supports connecting a GitHub repository for auto-deployment, **it's not advised**:
 
 - Every push triggers a deployment — locally unverified changes could hit production directly
-- Additional configuration for build commands / root directory is needed; auxiliary files like `tools/` in the repository are also pulled in
+- Additional configuration for build commands / root directory is needed
 - Secrets and branch states can easily become inconsistent, making troubleshooting difficult
-- This repository contains token extraction scripts — auto-syncing increases the exposure surface
+- Auto-deploying every push would ship tokens configured in CI and make the exposure surface harder to control
 
 **Recommended approach**: Modify code locally → deploy via Docker / self-hosted VPS, or (if you understand the risks) manually paste into the CF dashboard → deploy yourself — full control.
 

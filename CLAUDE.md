@@ -16,15 +16,7 @@ docker compose up -d --build
 node server.js
 
 # Build model cache JSON from official Freebuff sources
-node scripts/build-freebuff-models-json.mjs
-
-# Token extraction tool
-cd tools
-python3 extract.py login           # Start OAuth token extraction
-python3 extract.py show            # Show all accounts + status
-python3 extract.py export          # Export tokens one per line
-python3 extract.py quota           # Check usage
-python3 extract.py chat "Hello"    # Test chat
+node scripts/models.mjs
 
 # Test API endpoints
 curl http://localhost:8787/health
@@ -40,9 +32,9 @@ curl http://localhost:8787/v1/chat/completions -H "Authorization: Bearer <key>" 
 
 - **`server.js`** (~102 lines) — Node.js HTTP server that wraps `worker.js` for Docker deployment. Reads credentials from `credentials/*.json` directory, builds `FREEBUFF_TOKEN` env var, and translates Node.js HTTP ↔ Cloudflare `Request`/`Response`.
 
-- **`scripts/build-freebuff-models-json.mjs`** — Standalone parser that fetches Freebuff's official TypeScript source files from GitHub, extracts model→agent mappings and pool definitions, and produces `freebuff-models.json` + `MODELS.md`. Used by the `build-models-release` GitHub Actions workflow.
+- **`scripts/models.mjs`** — Standalone parser that fetches Freebuff's official TypeScript source files from GitHub, extracts model→agent mappings and pool definitions, and produces `freebuff-models.json` + `MODELS.md`.
 
-- **`tools/extract.py`** — Python OAuth token extraction tool (standard library only, no pip dependencies). Supports `login`, `show`, `chat`, `quota`, `session`, `export`, `tgsend` subcommands. Runs in GitHub Actions with Telegram delivery.
+> Tokens are supplied directly (`FREEBUFF_TOKEN` env var, or `credentials/*.json` in Docker). The in-repo token extraction tooling and GitHub Actions workflows were removed — see `server.js` for how credentials are loaded.
 
 ### Request Flow
 
@@ -118,5 +110,4 @@ Dockerfile bundles only `server.js` + `worker.js` (no npm dependencies). Credent
 
 ### GitHub Actions
 
-- **`build-models-release.yml`** (every 6 hours): Runs `build-freebuff-models-json.mjs`, uploads JSON to Release assets, commits MODELS.md updates, cleans old runs (keeps 1).
-- **`extract-token.yml`** (manual trigger): Runs `extract.py login`, sends auth link + token to Telegram. Requires `TG_BOT_TOKEN` + `TG_CHAT_ID` secrets.
+No workflows are tracked in this repository — the model-cache and token-extraction workflows were removed. `scripts/models.mjs` remains runnable locally (`node scripts/models.mjs`) to refresh the model cache.

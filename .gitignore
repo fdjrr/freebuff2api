@@ -3,7 +3,6 @@ node_modules/
 test/worker_tmp.mjs
 
 # Credential/token files, never commit
-tools/freebuff_credentials.json
 **/freebuff_credentials.json
 # Docker container credentials directory, never commit
 credentials/
@@ -34,8 +33,5 @@ logs/
 
 # Hermes local plans, experimental patches, and session data, local only
 .hermes/
-
-# Local quota verification script, local use only
-tools/test_extract_quota.py
 
 wrangler.jsonc
