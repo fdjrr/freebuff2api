@@ -3,7 +3,6 @@ let RELAY_URL = "";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
 const DEFAULT_API_KEY = "freebuff-default-key";
 const VERSION = "1.8.9";
-const CONTEXT_PRUNER_AGENT = "context-pruner";
 
 // Dynamic model registry: fetches model list from the official freebuff mirror
 // True source: https://github.com/CodebuffAI/freebuff (public mirror of freebuff-private)
@@ -318,7 +317,7 @@ function modelPoolCategory(modelId) {
 //   - mimo/mimo-v2.5   STANDARD model
 // All other models are provided by dynamic fetch (official source → GitHub Releases JSON → this fallback)
 const MODELS = [
-  { id: "mimo/mimo-v2.5", session: "mimo/mimo-v2.5", agent: "base2-free-mimo", upstream: "mimo/mimo-v2.5" },
+  { id: "mimo/mimo-v2.5", session: "mimo/mimo-v2.5", agent: "base3-free-mimo", base3_agent: "base3-free-mimo", upstream: "mimo/mimo-v2.5" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -431,6 +430,12 @@ export default {
 let accountIdx = 0;
 const cooldowns = new Map();      // token -> cooldown expiry ms
 const sessCache = new Map();      // `${token}`:${sessionModel}` -> { instanceId, model, remainingMs, expiresAt } (token-prefixed to prevent cross-account mixing)
+const runCache = new Map();       // `${token}:${agentId}` -> { runId, childRunId, ts }
+const RUN_CACHE_TTL_MS = 10 * 60 * 1000; // run_id is reusable across requests (upstream only validates existence); 10min cache saves two upstream calls
+
+function isPermanentFailure(state) {
+  return state === "banned" || state === "token_invalid" || state === "blocked" || state === "country_blocked";
+}
 
 
 function parseAccounts(env) {
@@ -453,6 +458,7 @@ function parseAccounts(env) {
 
 const acctHealth = new Map(); // token -> { alive, state, uid, quota, checkedAt }
 const HEALTH_OBSERVATION_TTL_MS = 10 * 60 * 1000;
+const sessionInFlight = new Map(); // `${token}:${sessionModel}` -> Promise — dedupe concurrent session creation
 
 // Only record upstream results observed by real business requests. Do not proactively probe in health,
 // and do not mistake network errors/unknown responses as account failures.
@@ -490,6 +496,42 @@ function recordAccountObservation(token, status, dataOrText, extra = {}) {
     poolLabel: extra.poolLabel || data?.rateLimit?.poolLabel || data?.poolLabel || previous.poolLabel || null,
     checkedAt: Date.now(),
   });
+  if (isPermanentFailure(state) && !previous.blacklisted) {
+    blacklistAccount(token, state);
+  }
+}
+
+const blacklisted = new Map(); // token -> { state, at }
+const actingUserIds = new Map(); // token -> userId (fetched once from /api/v1/me)
+
+function blacklistAccount(token, state) {
+  if (blacklisted.has(token)) return;
+  blacklisted.set(token, { state, at: Date.now() });
+  invalidateSessionCache(token);
+  for (const key of runCache.keys()) {
+    if (key.startsWith(token + ":")) runCache.delete(key);
+  }
+  console.log(`[blacklist] account ${token.slice(0, 8)}... blacklisted (${state}) — removed from pool`);
+}
+
+function isBlacklisted(token) {
+  return blacklisted.has(token);
+}
+
+function actingUserId(token) {
+  const cached = actingUserIds.get(token);
+  if (cached === null) return null; // previously failed, don't retry
+  if (cached) return cached;
+  actingUserIds.set(token, null); // mark in-flight / failed
+  // SDK (run.ts:735): userId from GET /api/v1/me. One-shot lazy fetch,
+  // serialized on the upstream queue (free-tier concurrency guard).
+  enqueueUp("GET", "/api/v1/me", token).then(r => {
+    if (r.status === 200 && r.data?.id) {
+      actingUserIds.set(token, r.data.id);
+    }
+    recordAccountObservation(token, r.status, r.data, { uid: r.data?.uid || null });
+  }).catch(() => {});
+  return null;
 }
 
 function summarizeAccountHealth(pool, health) {
@@ -530,18 +572,19 @@ function pickToken(env, sessionModel) {
   const pool = parseAccounts(env);
   if (pool.length === 0) return null;
 
-  // v1.6.0: skip accounts probed as dead (alive=false); do not skip unprobed/failed probes (avoid false positives)
   const alivePool = pool.filter((acct) => {
+    if (blacklisted.has(acct.token)) return false;
     const h = acctHealth.get(acct.token);
-    return !(h && h.alive === false);
+    if (!h || h.alive) return true;
+    return isPermanentFailure(h.state);
   });
-  const usePool = alivePool.length > 0 ? alivePool : pool; // fall back to full pool when all dead; let 429 cooldown handle it
+  if (alivePool.length === 0) return null;
 
   // v1.8.5.1: account selection restored to stable round-robin.
   // rateLimitsByModel is observation-only, does not affect round-robin order; real session/chat
   // only triggers cooldown skip after receiving explicit rate limits. This prevents stale snapshots from
   // hijacking the round-robin or reordering accounts by "most remaining quota first".
-  const finalPool = usePool;
+  const finalPool = alivePool;
 
   // Prefer accounts with active session caches: a session lasts ~1 hour, quota is deducted only on session creation
   // Free quota (e.g., v4-pro 6/day). Pure round-robin would switch accounts and create a session per request,
@@ -557,16 +600,14 @@ function pickToken(env, sessionModel) {
     }
   }
 
-  // Only round-robin when no active cache exists (skip cooldown accounts)
+  // Only round-robin when no active cache exists (skip cooldown accounts); never force-clear a cooldown
   for (let k = 0; k < finalPool.length; k++) {
     const acct = finalPool[accountIdx % finalPool.length];
     accountIdx = (accountIdx + 1) % finalPool.length;
     const t = acct.token;
     if (!cooldowns.has(t) || cooldowns.get(t) <= Date.now()) return acct;
   }
-  const oldest = [...cooldowns.entries()].sort((a, b) => a[1] - b[1])[0];
-  if (oldest) cooldowns.delete(oldest[0]);
-  return finalPool[0];
+  return null;
 }
 
 function normalizeSession(data, requestedModel, now = Date.now()) {
@@ -762,19 +803,20 @@ function getRelayUrl() {
   return selected;
 }
 
-// Standard Codebuff CLI / Desktop mimic headers (Anti-Detection)
+// Official SDK headers (sdk/src/impl/model-provider.ts:150, database.ts:319):
+// chat uses `ai-sdk/openai-compatible/<version>/codebuff`; session/agent-runs
+// send no product UA (default fetch UA). x-freebuff-acting-user-id is only sent
+// when a real userId exists (from /api/v1/me login) — a token-only proxy must
+// omit it rather than fabricate a UUID.
 function applyMimicHeaders(headers) {
   const h = headers instanceof Headers ? headers : new Headers(headers);
-  if (!h.has("x-freebuff-sdk-version")) h.set("x-freebuff-sdk-version", "0.0.141");
-  if (!h.has("x-freebuff-client-type")) h.set("x-freebuff-client-type", "cli");
-  if (!h.has("x-freebuff-ide-type")) h.set("x-freebuff-ide-type", "cli");
-  if (!h.has("User-Agent")) {
-    h.set("User-Agent", "codebuff-cli/1.0.685");
-  }
   if (!h.has("Accept")) h.set("Accept", "application/json, text/plain, */*");
   if (!h.has("Accept-Language")) h.set("Accept-Language", "en-US,en;q=0.9");
   return headers instanceof Headers ? h : Object.fromEntries(h.entries());
 }
+
+const CHAT_USER_AGENT = "ai-sdk/openai-compatible/0.0.0-test/codebuff ai-sdk/provider-utils/3.0.25 runtime/browser";
+const ADS_USER_AGENT = "Freebuff-CLI/0.0.163";
 
 // Resolve upstream URL: if RELAY_URL is set, route through relay (inject relay headers)
 function resolveUpstream(path, extraHeaders = {}) {
@@ -957,25 +999,47 @@ function stableFingerprint(token) {
   return "codebuff-cli-" + (h1 ^ h2).toString(16).padStart(8, "0");
 }
 
-// Ad chain: POST /ads to fetch → if impUrl exists, POST /ads/impression for impression reporting.
-// Matches official codebuff-cli device metadata & timezone
+// Ad + usage touch (30-min throttle, silent failure)
+function adDeviceInfo() {
+  const platform = typeof process !== "undefined" ? process.platform : "linux";
+  const os = platform === "darwin" ? "macos" : platform === "win32" ? "windows" : "linux";
+  let timezone = "America/Los_Angeles", locale = "en-US";
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions();
+    if (tz.timeZone) timezone = tz.timeZone;
+    if (tz.locale) locale = tz.locale;
+  } catch {}
+  return { os, timezone, locale };
+}
+
+function adBrowserUserAgent(os) {
+  const ua = {
+    macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+  };
+  return ua[os] || "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
+}
+
 async function runNormalClientBehavior(token, clientFingerprint) {
   const failures = [];
   // 1) Ad fetch + impression (every 30 min, avoid hitting ad API per request)
   if (behaviorDue("ads:" + token)) {
     try {
+      const devInfo = adDeviceInfo();
       const ad = await enqueueUp("POST", "/api/v1/ads", token, {
         provider: "gravity",
+        messages: [],
         sessionId: crypto.randomUUID(),
         surface: "waiting_room",
-        device: { os: "linux", timezone: "America/Los_Angeles", locale: "en-US" },
-        userAgent: "codebuff-cli/1.0.685",
-      }, { "User-Agent": "codebuff-cli/1.0.685", "Content-Type": "application/json" }, 6000);
+        placementIds: ["waiting-room-1"],
+        device: devInfo,
+        userAgent: adBrowserUserAgent(devInfo.os),
+      }, { "User-Agent": ADS_USER_AGENT, "Content-Type": "application/json" }, 6000);
       const impUrl = ad.data && Array.isArray(ad.data.ads) && ad.data.ads[0] && ad.data.ads[0].impUrl;
       if (ad.status === 200 && impUrl) {
         await enqueueUp("POST", "/api/v1/ads/impression", token,
           { impUrl, mode: "free" },
-          { "User-Agent": "codebuff-cli/1.0.685", "Content-Type": "application/json" }, 6000);
+          { "User-Agent": ADS_USER_AGENT, "Content-Type": "application/json" }, 6000);
       }
     } catch (e) { failures.push("ads:" + String(e && e.message || e).slice(0, 80)); }
   }
@@ -984,7 +1048,7 @@ async function runNormalClientBehavior(token, clientFingerprint) {
     try {
       await enqueueUp("POST", "/api/v1/usage", token,
         { fingerprintId: clientFingerprint },
-        { "Content-Type": "application/json", "User-Agent": "codebuff-cli/1.0.685" }, 6000);
+        { "Content-Type": "application/json", "User-Agent": ADS_USER_AGENT }, 6000);
     } catch (e) { failures.push("usage:" + String(e && e.message || e).slice(0, 80)); }
   }
   return failures;
@@ -993,6 +1057,10 @@ async function runNormalClientBehavior(token, clientFingerprint) {
 async function createSession(token, sessionModel, forceCreate = false) {
   // 0) Normal client behavior: ad chain + usage touch (30-minute throttle, silent failure)
   try { await runNormalClientBehavior(token, stableFingerprint(token)); } catch {}
+  if (!forceCreate) {
+    const inflight = sessionInFlight.get(token + ":" + sessionModel);
+    if (inflight) return inflight;
+  }
   // 1) Cache hit and not expired (>60s remaining): reuse directly to avoid hitting upstream session API per request
   if (!forceCreate) {
     const cached = sessCache.get(token + ":" + sessionModel);
@@ -1001,77 +1069,86 @@ async function createSession(token, sessionModel, forceCreate = false) {
     }
     if (cached) sessCache.delete(token + ":" + sessionModel);
   }
-  // 1) Check upstream current session, reuse if same model (skip on forceCreate: zombie active sessions get repeatedly reused by GET,
-  //    causing persistent 428 on chat; force POST for a fresh instance)
-  //    Desktop signature: GET with include-unused-rate-limits (model selector quota snapshot header)
-  if (!forceCreate) {
-    const cur = await enqueueUp("GET", "/api/v1/freebuff/session", token, undefined,
-      DESKTOP_INCLUDE_RATE_LIMITS, SESSION_TIMEOUT_MS);
-    recordAccountObservation(token, cur.status, cur.data, {
-      quota: cur.data?.rateLimitsByModel || null,
-      uid: cur.data?.uid || null,
-      retryAfterMs: cur.data?.retryAfterMs,
-    });
-    if (cur.status === 200 && cur.data?.status === "active" && cur.data?.instanceId) {
-      const cm = cur.data.model;
-      if (!cm || cm === sessionModel) {
-        const s = normalizeSession(cur.data, sessionModel);
-        sessCache.set(token + ":" + sessionModel, s);
-        return s;
+  const inflightKey = token + ":" + sessionModel;
+  const doCreate = async () => {
+    try {
+      // 1) Check upstream current session, reuse if same model (skip on forceCreate: zombie active sessions get repeatedly reused by GET,
+      //    causing persistent 428 on chat; force POST for a fresh instance)
+      //    Desktop signature: GET with include-unused-rate-limits (model selector quota snapshot header)
+      if (!forceCreate) {
+        const cur = await enqueueUp("GET", "/api/v1/freebuff/session", token, undefined,
+          DESKTOP_INCLUDE_RATE_LIMITS, SESSION_TIMEOUT_MS);
+        recordAccountObservation(token, cur.status, cur.data, {
+          quota: cur.data?.rateLimitsByModel || null,
+          uid: cur.data?.uid || null,
+          retryAfterMs: cur.data?.retryAfterMs,
+        });
+        if (cur.status === 200 && cur.data?.status === "active" && cur.data?.instanceId) {
+          const cm = cur.data.model;
+          if (!cm || cm === sessionModel) {
+            const s = normalizeSession(cur.data, sessionModel);
+            sessCache.set(token + ":" + sessionModel, s);
+            return s;
+          }
+          await deleteUpstreamSession(token, cur.data.instanceId);
+        }
       }
-      await deleteUpstreamSession(token, cur.data.instanceId);
-    }
-  }
 
-
-  // 2) create (may queue). Desktop signature: POST with pre-generated x-freebuff-instance-id (client UUID).
-  //    ⚠️ Tested (2026-08-10): multi-session:1 instances return 428 waiting_room_required on chat
-  //    (server chat gate does not recognize multi-session instances), so we use single-session + pre-generated instance-id:
-  //    retains the desktop client pre-generated instance fingerprint while ensuring chat is recognized.
-  const instId = crypto.randomUUID();
-  const r = await enqueueUp("POST", "/api/v1/freebuff/session", token, undefined,
-    { "x-freebuff-model": sessionModel, "x-freebuff-instance-id": instId, "Content-Type": "application/json" }, SESSION_TIMEOUT_MS);
-  recordAccountObservation(token, r.status, r.data, {
-    quota: r.data?.rateLimitsByModel || null,
-    uid: r.data?.uid || null,
-    retryAfterMs: r.data?.retryAfterMs,
-  });
-  if (r.status === 200 && r.data?.status === "active" && r.data?.instanceId) {
-    const s = normalizeSession(r.data, sessionModel);
-    sessCache.set(token + ":" + sessionModel, s);
-    return s;
-  }
-  if (r.status === 200 && r.data?.status === "queued" && r.data?.instanceId) {
-    const inst = r.data.instanceId;
-    for (let i = 0; i < 8; i++) {
-      await sleep(1500);
-      const q = await enqueueUp("GET", "/api/v1/freebuff/session", token, undefined, { "x-freebuff-instance-id": inst }, SESSION_TIMEOUT_MS);
-      recordAccountObservation(token, q.status, q.data, {
-        quota: q.data?.rateLimitsByModel || null,
-        uid: q.data?.uid || null,
-        retryAfterMs: q.data?.retryAfterMs,
+      // 2) create (may queue). Desktop signature: POST with pre-generated x-freebuff-instance-id (client UUID).
+      //    ⚠️ Tested (2026-08-10): multi-session:1 instances return 428 waiting_room_required on chat
+      //    (server chat gate does not recognize multi-session instances), so we use single-session + pre-generated instance-id:
+      //    retains the desktop client pre-generated instance fingerprint while ensuring chat is recognized.
+      const instId = crypto.randomUUID();
+      const r = await enqueueUp("POST", "/api/v1/freebuff/session", token, undefined,
+        { "x-freebuff-model": sessionModel, "x-freebuff-instance-id": instId, "Content-Type": "application/json" }, SESSION_TIMEOUT_MS);
+      recordAccountObservation(token, r.status, r.data, {
+        quota: r.data?.rateLimitsByModel || null,
+        uid: r.data?.uid || null,
+        retryAfterMs: r.data?.retryAfterMs,
       });
-      if (q.status === 200 && q.data?.status === "active") {
-        const s = normalizeSession({ ...q.data, instanceId: q.data.instanceId || inst }, sessionModel);
+      if (r.status === 200 && r.data?.status === "active" && r.data?.instanceId) {
+        const s = normalizeSession(r.data, sessionModel);
         sessCache.set(token + ":" + sessionModel, s);
         return s;
       }
+      if (r.status === 200 && r.data?.status === "queued" && r.data?.instanceId) {
+        const inst = r.data.instanceId;
+        for (let i = 0; i < 8; i++) {
+          await sleep(1500);
+          const q = await enqueueUp("GET", "/api/v1/freebuff/session", token, undefined, { "x-freebuff-instance-id": inst }, SESSION_TIMEOUT_MS);
+          recordAccountObservation(token, q.status, q.data, {
+            quota: q.data?.rateLimitsByModel || null,
+            uid: q.data?.uid || null,
+            retryAfterMs: q.data?.retryAfterMs,
+          });
+          if (q.status === 200 && q.data?.status === "active") {
+            const s = normalizeSession({ ...q.data, instanceId: q.data.instanceId || inst }, sessionModel);
+            sessCache.set(token + ":" + sessionModel, s);
+            return s;
+          }
+        }
+        throw new Error("session stayed queued (retry later)");
+      }
+      if (r.status === 429 || (r.text || "").includes("spend_limited") || (r.text || "").includes("rate_limited")) {
+        const cdMs = parseCooldown(r.text || JSON.stringify(r.data), 429);
+        cooldown(token, cdMs);
+        throw new Error(`account_rate_limited: 429 (cooldown ${(cdMs/1000/60).toFixed(1)}m) ${r.text || ""}`);
+      }
+      // 409 session_model_mismatch = model-level rejection (tier/permission), not account failure.
+      // Fail fast: don't retry other accounts for a model the upstream rejects for all of them.
+      const mismatchMsg = String(r.data?.message || r.data?.error || "upstream rejected this model").replace(/^session_model_mismatch:\s*/, "");
+      if (r.status === 409 && (r.text || "").includes("session_model_mismatch")) {
+        throw new SessionModelMismatchError("session_model_mismatch: " + mismatchMsg);
+      }
+      if (r.status === 409) throw new Error("session_model_mismatch: " + mismatchMsg);
+      throw new Error("create session failed: " + r.status + " " + (r.text || "").slice(0, 300));
+    } finally {
+      sessionInFlight.delete(inflightKey);
     }
-    throw new Error("session stayed queued (retry later)");
-  }
-  if (r.status === 429 || (r.text || "").includes("spend_limited") || (r.text || "").includes("rate_limited")) {
-    const cdMs = parseCooldown(r.text || JSON.stringify(r.data), 429);
-    cooldown(token, cdMs);
-    throw new Error(`account_rate_limited: 429 (cooldown ${(cdMs/1000/60).toFixed(1)}m) ${r.text || ""}`);
-  }
-  // 409 session_model_mismatch = model-level rejection (tier/permission), not account failure.
-  // Fail fast: don't retry other accounts for a model the upstream rejects for all of them.
-  const mismatchMsg = String(r.data?.message || r.data?.error || "upstream rejected this model").replace(/^session_model_mismatch:\s*/, "");
-  if (r.status === 409 && (r.text || "").includes("session_model_mismatch")) {
-    throw new SessionModelMismatchError("session_model_mismatch: " + mismatchMsg);
-  }
-  if (r.status === 409) throw new Error("session_model_mismatch: " + mismatchMsg);
-  throw new Error("create session failed: " + r.status + " " + (r.text || "").slice(0, 300));
+  };
+  const p = doCreate();
+  if (!forceCreate) sessionInFlight.set(inflightKey, p);
+  return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,8 +1160,11 @@ function utcNow() {
 }
 
 async function startRun(token, agentId, ancestors = []) {
+  const h = {};
+  const uid = actingUserId(token);
+  if (uid) h["x-freebuff-acting-user-id"] = uid;
   const r = await enqueueUp("POST", "/api/v1/agent-runs", token,
-    { action: "START", agentId, ancestorRunIds: ancestors }, undefined, SESSION_TIMEOUT_MS);
+    { action: "START", agentId, ancestorRunIds: ancestors }, h, SESSION_TIMEOUT_MS);
   if (r.status !== 200 || !r.data?.runId) throw new Error("start_run failed: " + r.status + " " + (r.text || "").slice(0, 200));
   return r.data.runId;
 }
@@ -1095,15 +1175,12 @@ async function recordStep(token, runId, stepNumber, startTime, children = [], me
 }
 
 async function finishRun(token, runId, totalSteps) {
+  const h = {};
+  const uid = actingUserId(token);
+  if (uid) h["x-freebuff-acting-user-id"] = uid;
   await enqueueUp("POST", "/api/v1/agent-runs", token,
-    { action: "FINISH", runId, status: "completed", totalSteps, directCredits: 0, totalCredits: 0 }, undefined, SESSION_TIMEOUT_MS);
+    { action: "FINISH", runId, status: "completed", totalSteps, directCredits: 0, totalCredits: 0 }, h, SESSION_TIMEOUT_MS);
 }
-
-// Direct models (deepseek, etc.): main run + context-pruner sub-run
-// Simplified: only START two runs (chat only validates run_id existence; recordStep/finishRun can be skipped),
-// Measured total chain latency under 4s (original 8s), meeting qwenpaw check_model_connection 5s timeout
-const runCache = new Map();   // `${token}:${agentId}` -> { runId, childRunId, ts }
-const RUN_CACHE_TTL_MS = 10 * 60 * 1000; // run_id is reusable across requests (upstream only validates existence); 10min cache saves two upstream calls
 
 async function startRunChain(token, agentId) {
   const key = token + ":" + agentId;
@@ -1113,9 +1190,8 @@ async function startRunChain(token, agentId) {
   }
   const startedAt = utcNow();
   const runId = await startRun(token, agentId);
-  const childRunId = await startRun(token, CONTEXT_PRUNER_AGENT, [runId]);
-  runCache.set(key, { runId, childRunId, ts: Date.now() });
-  return { runId, agentId, startedAt, childRunId, cached: false };
+  runCache.set(key, { runId, childRunId: null, ts: Date.now() });
+  return { runId, agentId, startedAt, childRunId: null, cached: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,10 +1205,7 @@ const UPSTREAM_KEYS = [
   "temperature", "tool_choice", "tools", "top_logprobs", "top_p", "top_k", "user",
 ];
 
-// Official free-mode marker requires system prompt to start with "You are Buffy, the strategic coding assistant."
-// byte-level opening (server hasFreebuffRootSystemPromptOpening check; the old `[System Override...]`
-// prefix bypass has been patched by upstream, returning 403 free_mode_cli_required).
-const BUFFY = "You are Buffy, the strategic coding assistant.";
+const BUFFY = "You are Buffy, the coding agent behind Codebuff.";
 
 function normalizeMessages(messages) {
   if (!Array.isArray(messages)) return [];
@@ -1236,8 +1309,7 @@ function buildUpstreamPayload(params, mc, sess, runId) {
     freebuff_instance_id: sess.instanceId,
     trace_session_id: crypto.randomUUID(),
     run_id: runId,
-    // Official SDK: client_id = clientSessionId (session-level stable identifier), not a random number
-    client_id: stableFingerprint(runId || "session"),
+    client_id: Math.random().toString(36).substring(2, 15),
     cost_mode: "free",
   };
   return payload;
@@ -1462,7 +1534,7 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
       const resp = await fetch(...resolveChatUrl("/api/v1/chat/completions", {
         Authorization: "Bearer " + token,
         "Content-Type": "application/json",
-        "x-freebuff-instance-id": sess.instanceId,
+        "User-Agent": CHAT_USER_AGENT,
       }), {
         method: "POST",
         body: JSON.stringify(payload),
@@ -1531,7 +1603,13 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
   for (let acctTry = 0; acctTry < pool.length; acctTry++) {
     const acct = pickToken(env, mc.session);
     const token = acct ? acct.token : null;
-    if (!token) break;
+    if (!token) {
+      const cd = [...cooldowns.values()].sort((a, b) => a - b)[0] || 0;
+      lastErrMsg = cd > Date.now()
+        ? `all accounts rate-limited, retry after ${Math.ceil((cd - Date.now()) / 1000)}s`
+        : "no usable account (all banned or unavailable)";
+      break;
+    }
     // Log the route decision once per attempt, at the END, with the actual outcome.
     // Logging before createSession would announce an account that may immediately fail,
     // and the attempt counter already reflects the round-robin position.
@@ -1545,7 +1623,7 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
       if (debug) console.log(`[acct ${attemptNum}] session=${sess.instanceId}`);
 
       // 2) run chain
-      const run = await startRunChain(token, mc.agent);
+      const run = await startRunChain(token, mc.base3_agent || mc.agent);
       if (debug) console.log(`[acct ${acctTry + 1}] run=${run.runId}`);
 
       // 3) chat (428 waiting_room_required / 409 session_superseded = session stale,
@@ -1556,15 +1634,10 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         const headers = {
           Authorization: "Bearer " + token,
           "Content-Type": "application/json",
-          "x-freebuff-instance-id": sessForChat.instanceId,
+          "User-Agent": CHAT_USER_AGENT,
         };
-        // x-freebuff-acting-user-id: ⚠️ Tested (2026-08-10) — chat only passes (200) without this header,
-        // adding it causes 409 session_superseded ("Another instance of freebuff has taken over
-        // this session. Only one instance per account is allowed."）。
-        // Reason: the pre-generated instance-id already binds the session to the token itself; adding acting-user-id
-        // makes the server think a second instance is competing for the same slot. Desktop also omits this header by default (only used when
-        // impersonating another user). So we no longer send acting-user-id.
-        if (debug) console.log(`[acct ${acctTry + 1}][chat] attempt=${attempt + 1}`);
+        const uid = actingUserId(token);
+        if (uid) headers["x-freebuff-acting-user-id"] = uid;
         const [chatUrl, chatHeaders] = resolveChatUrl("/api/v1/chat/completions", headers);
         const chatInit = {
           method: "POST", headers: chatHeaders, body: JSON.stringify(payload),

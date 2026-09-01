@@ -1,4 +1,4 @@
-# Freebuff Available Models (2026-09-01 01:40:42 Beijing time)
+# Freebuff Available Models (2026-09-01 11:22:46 Beijing time)
 
 > Auto-generated · Source:[CodebuffAI/freebuff](https://github.com/CodebuffAI/freebuff) main · Updated every 6 hours
 
@@ -25,4 +25,4 @@
 - `z-ai/glm-5.2` —— GLM 5.2 (Zhipu AI, recommended after unlocking)
 
 ---
-13 models · Last updated: 2026-09-01 01:40:42
+13 models · Last updated: 2026-09-01 11:22:46
