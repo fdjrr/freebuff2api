@@ -8,6 +8,7 @@ services:
       - .env
     volumes:
       - ./credentials:/app/credentials:ro
+      - ./proxies.txt:/app/proxies.txt:ro
     ports:
       - "8787:8787"
     networks:

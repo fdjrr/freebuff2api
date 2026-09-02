@@ -65,7 +65,7 @@ Apart from these two special models, all regular models are understood to have a
    - `FREEBUFF_TOKEN` (required) = your token
    - `FREEBUFF_API_KEY` (optional) = custom API access key, defaults to `freebuff-default-key`
 4. Connect with any OpenAI client:
-   - **Base URL**: `http://localhost:8877/v1` (Docker) or `https://your-worker.your-subdomain.workers.dev/v1` (CF, not recommended)
+   - **Base URL**: `http://localhost:8787/v1` (Docker) or `https://your-worker.your-subdomain.workers.dev/v1` (CF, not recommended)
    - **API Key**: `<your FREEBUFF_API_KEY value>`
 
 > 🌐 **Custom Domain**: If `*.workers.dev` is inaccessible from your region (blocked/restricted), you can bind a custom domain to the Worker and use `https://your-domain/v1` as the Base URL. See "[Custom Domain](#-custom-domain)" below.
@@ -92,10 +92,10 @@ For authenticated account details, use `GET /v1/accounts` (or `/accounts`). It r
 
 | Deployment | How to provide the token |
 |---|---|
-| Docker / Node (`server.js`) | Drop one JSON file per account in `credentials/` — each file's `authToken` field is loaded (`{"email": "...", "authToken": "...", "name": "..."}`). A raw `FREEBUFF_TOKEN` env var is also supported and merged in. |
+| Docker / Node (`server.js`) | Place `.json` or `.jsonl` files in `credentials/` (e.g. `credentials/accounts.jsonl` or `credentials/acc1.json`). Each entry's `authToken` / `token` and optional `user.id` / `uid` are automatically parsed. A raw `FREEBUFF_TOKEN` env var is also supported and merged in. |
 | Cloudflare Worker (not recommended) | Set `FREEBUFF_TOKEN` as a Worker Secret (comma-separated for multiple accounts). |
 
-> 💡 **Multiple accounts**: separate tokens with commas (`token1,token2`) or, for Docker, add more JSON files under `credentials/`. Flat-token separation is a plain line split on commas **and** newlines, so newline-separated values work too.
+> 💡 **Multiple accounts**: separate tokens with commas (`token1,token2`) or newlines, or for Docker, place JSON / JSONL files under `credentials/`. Flat-token separation is a plain line split on commas **and** newlines, so newline-separated values work too.
 
 ## 🛠️ Deployment
 
@@ -115,16 +115,19 @@ FREEBUFF_API_KEY=your-api-key
 RELAY_URL=
 EOF
 
-# 3. Account credentials: place one JSON file per account under credentials/ (server.js reads the authToken field)
+# 3. Account credentials: place JSON or JSONL files under credentials/
 mkdir -p credentials
-# credentials/<any-name>.json = {"email": "...", "authToken": "...", "name": "..."}
+# Option A: Single accounts.jsonl containing multiple lines:
+# {"authToken": "...", "email": "...", "user": {"id": "..."}}
+# Option B: Individual JSON files (e.g. credentials/acc1.json):
+# {"email": "...", "authToken": "...", "name": "..."}
 
 # 4. Start
-chmod 600 .env credentials/*.json
+chmod 600 .env credentials/*
 docker compose up -d --build
 ```
 
-After startup, the service listens on `0.0.0.0:8787` (compose maps to host port `8877`). Base URL: `http://localhost:8877/v1`.
+After startup, the service listens on `0.0.0.0:8787` (accessible at `http://localhost:8787/v1`).
 
 **Environment Variables:**
 
@@ -135,8 +138,10 @@ After startup, the service listens on `0.0.0.0:8787` (compose maps to host port 
 | `FREEBUFF_DEBUG` | Set to `true` to enable per-request debug logging |
 | `CODEBUFF_API` | Upstream address; empty = direct to `https://www.codebuff.com`; set to a relay domain when using a self-hosted relay |
 | `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all traffic through relay |
+| `PROXIES_FILE` | Path to rotating proxies list file (default: `proxies.txt`) |
+| `PROXY_URL` | Upstream rotating proxy URL(s), comma/newline separated |
 
-> ⚠️ Inside the container, `credentials/` is mounted as read-only. `server.js` reads and assembles `FREEBUFF_TOKEN` at startup (multiple accounts comma-separated).
+> ⚠️ Inside the container, `credentials/` and `proxies.txt` are mounted as read-only. `server.js` reads and assembles `FREEBUFF_TOKEN` and proxy rotation at startup.
 
 ### Cloudflare Worker Deployment (❌ Not Recommended)
 

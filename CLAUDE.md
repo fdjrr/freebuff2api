@@ -30,11 +30,11 @@ curl http://localhost:8787/v1/chat/completions -H "Authorization: Bearer <key>" 
 
 - **`worker.js`** (~2140 lines) — Single-file Cloudflare Worker. All logic lives here: routing, upstream API lifecycle, multi-account management, model registry, streaming, and all API format adapters (OpenAI Chat, OpenAI Responses, Anthropic Messages). Exports a `fetch(request, env)` handler.
 
-- **`server.js`** (~102 lines) — Node.js HTTP server that wraps `worker.js` for Docker deployment. Reads credentials from `credentials/*.json` directory, builds `FREEBUFF_TOKEN` env var, and translates Node.js HTTP ↔ Cloudflare `Request`/`Response`.
+- **`server.js`** (~102 lines) — Node.js HTTP server that wraps `worker.js` for Docker deployment. Reads credentials from `credentials/*.json` and `credentials/*.jsonl` files, builds `FREEBUFF_TOKEN` env var, and translates Node.js HTTP ↔ Cloudflare `Request`/`Response`.
 
 - **`scripts/models.mjs`** — Standalone parser that fetches Freebuff's official TypeScript source files from GitHub, extracts model→agent mappings and pool definitions, and produces `freebuff-models.json` + `MODELS.md`.
 
-> Tokens are supplied directly (`FREEBUFF_TOKEN` env var, or `credentials/*.json` in Docker). The in-repo token extraction tooling and GitHub Actions workflows were removed — see `server.js` for how credentials are loaded.
+> Tokens are supplied directly (`FREEBUFF_TOKEN` env var, or `credentials/*.json` / `credentials/*.jsonl` in Docker). The in-repo token extraction tooling and GitHub Actions workflows were removed — see `server.js` for how credentials are loaded.
 
 ### Request Flow
 
@@ -102,11 +102,13 @@ Three upstream quota pools (from Freebuff's `freebuff-models.ts`):
 | `FREEBUFF_DEBUG` | `true` for per-request debug logging |
 | `CODEBUFF_API` | Upstream URL override (default: `https://www.codebuff.com`) |
 | `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all upstream traffic through relay |
+| `PROXIES_FILE` | Path to rotating proxies list file (default: `proxies.txt`) |
+| `PROXY_URL` | Upstream rotating proxy URL(s), comma/newline separated |
 | `PORT` / `HOST` | Listen port/address (default: `8787` / `0.0.0.0`) |
 
 ### Docker Deployment
 
-Dockerfile bundles only `server.js` + `worker.js` (no npm dependencies). Credentials mounted as `credentials/:ro`. Docker Compose maps port 8787 → 8877, uses external `homelabs` network.
+Dockerfile bundles only `server.js` + `worker.js` (no npm dependencies). Credentials mounted as `credentials/:ro` and proxies as `proxies.txt:ro`. Docker Compose maps port 8787 → 8877, uses external `homelabs` network.
 
 ### GitHub Actions
 

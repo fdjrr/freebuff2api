@@ -36,3 +36,5 @@ logs/
 
 wrangler.jsonc
 *.har
+
+proxies.txt
