@@ -103,7 +103,7 @@ Three upstream quota pools (from Freebuff's `freebuff-models.ts`):
 | `CODEBUFF_API` | Upstream URL override (default: `https://www.codebuff.com`) |
 | `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all upstream traffic through relay |
 | `PROXIES_FILE` | Path to rotating proxies list file (default: `proxies.txt`) |
-| `PROXY_URL` | Upstream rotating proxy URL(s), comma/newline separated |
+| `PROXY_URL` / `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` | Egress proxy URL(s) supporting `http://`, `socks5://`, `host:port`, and `host:port:user:pass` (comma/newline separated or via `PROXIES_FILE`) |
 | `PORT` / `HOST` | Listen port/address (default: `8787` / `0.0.0.0`) |
 
 ### Docker Deployment
