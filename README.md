@@ -1,329 +1,284 @@
 # freebuff2api
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?logo=docker&logoColor=white)](Dockerfile)
+[![Node.js](https://img.shields.io/badge/node.js-6DA55F?logo=node.js&logoColor=white)](package.json)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare_Workers-F38020?logo=cloudflare&logoColor=white)](worker.js)
 
-> 🎉 Welcome! For questions or ideas, feel free to open an Issue / PR.
-> License: **[MIT](#-license)**
+A high-performance reverse proxy that exposes Freebuff / Codebuff free models as OpenAI-compatible and Anthropic Messages-compatible APIs.
 
-Exposes **freebuff/codebuff**'s free models as an **OpenAI-compatible API**. Single-file, zero external dependencies — **Docker container deployment recommended** (or self-hosted VPS). Compatible with any OpenAI SDK / client (QwenPaw, Hermes, ChatGPT-Next-Web, LobeChat, one-api, etc.).
+Designed with zero external npm dependencies, the project runs across Docker containers, standalone Node.js servers, or serverless Cloudflare Workers.
 
-> ⚠️ **Important Deployment Note**: Freebuff has been actively detecting Cloudflare Worker deployments (identifying `cf-worker` / `cf-ray` edge markers). **Deploying on CF significantly increases the risk of account suspension.** Therefore, this project **does NOT recommend Cloudflare deployment** — use **Docker containers** or a self-hosted VPS instead (see "[🐳 Docker Container Deployment](#-docker-container-deployment-recommended)" below).
+---
 
-## ✨ Features
+## Key Features
 
-- ⭐ **Full-Access Mode Models**: Cloudflare Workers default to US egress, typically granting Freebuff's full-access mode; DeepSeek V4 Flash and MiMo 2.5 are officially classified as non-Premium models
-- 🔒 **Standard Model Base Quota**: Aside from the two special models above, regular models operate on a base quota of 6 sessions per day; not advertised as unlimited
-- 🔁 **Multi-Account Auto-Failover**: Automatically cools down quota-exhausted accounts and switches to the next — just comma-separate your tokens
-- 💡 **Active Session Reuse Priority**: A session lasts ~1 hour; quota is deducted only when a session is created. As long as the current model's session is still active, the Worker sticks to the same account, maximizing quota utilization
-- 📢 **Ad & Streak Flow Compatibility**: Before creating a new session, the Worker requests ads (matching the official client flow) and calls `GET /api/v1/freebuff/streak` for check-in. Failures are silently skipped — they never block the chat
-- 🧩 **OpenAI Compatible**: `/v1/models`, `/v1/chat/completions`, `/v1/responses` (streaming/non-streaming depending on interface support)
-- 📨 **Anthropic Messages API**: Supports `/v1/messages`, `/messages`, and corresponding `count_tokens` routes — usable with Anthropic SDK / compatible clients
-- ❤️ **Health Check**: `GET /health` (no auth required) — convenient for monitoring uptime
-- 📦 **Single-File Deployment**: Zero dependencies, single `worker.js` — works across CF / Docker / VPS
+- **Unified API Interfaces**:
+  - **OpenAI Chat Completions** (`/v1/chat/completions`) — Streaming (SSE) and non-streaming support.
+  - **OpenAI Responses API** (`/v1/responses`) — Full event translation and format conversion.
+  - **Anthropic Messages API** (`/v1/messages`, `/v1/messages/count_tokens`) — Native tools, system prompts, thinking effort, and Anthropic SSE streaming.
+- **Advanced Multi-Account Management**:
+  - Pool multiple accounts using comma/newline-separated tokens or directory mounting (`credentials/*.json`, `credentials/*.jsonl`).
+  - Automatic cooldown and transparent in-request failover on 429 (rate limit) or stale sessions.
+  - Configurable account selection strategies: `sticky`, `round_robin_active`, and `pure_round_robin`.
+- **Anti-Ban and Upstream Lifecycle Emulation**:
+  - Faithfully emulates Freebuff's agentic orchestrator lifecycle: Session Creation -> Run Chain Initialization -> Streaming Completion.
+  - Auto-injects required system prompt signatures (`Buffy`) and synthetic tool markers.
+  - Clamps reasoning effort per model to match official upstream constraints.
+- **Zero-Dependency Egress Proxying**:
+  - Built-in native support for HTTP CONNECT, SOCKS5 (RFC 1928 / RFC 1929 with auth), and raw `host:port[:user:pass]` proxy rotations directly in Node.js.
+  - Optional Cloudflare Relay (`RELAY_URL`) support to mask egress traffic.
+- **Observability and Health Checks**:
+  - `GET /health` — Public endpoint returning status, version, active routing strategy, and aggregated account health metrics.
+  - `GET /v1/accounts` — Authenticated inspection of account pool status, tiers, and quotas.
 
-## 📨 Anthropic Messages API Support
+---
 
-The codebase includes an Anthropic Messages API adapter, currently supporting:
+## Architecture Overview
 
-- `POST /v1/messages`
-- `POST /messages`
-- `POST /v1/messages/count_tokens`
-- `POST /messages/count_tokens`
-- Conversion of Anthropic message format to the Worker's internal OpenAI-compatible request format
-- Text messages, `tool_use` / `tool_result`, `tool_choice`
-- Non-streaming responses and Anthropic SSE streaming
-- Anthropic-style error responses
-
-> ⚠️ **Testing Note**: The current maintainers lack a real Anthropic Messages API client environment, so end-to-end testing with actual Anthropic clients has not been completed. The core code and local stub/regression tests handle and verify the conversion logic, but not all Anthropic SDK, tool-call combinations, and client behaviors have been covered.
->
-> If you have an actual use case for the Anthropic Messages API, testing is welcome as long as existing OpenAI API routes are not affected. Please report request format, streaming response, tool-call, or model compatibility issues you encounter, ideally with a sanitized request structure, response status code, and error message.
->
-> The Anthropic API is a new protocol adaptation layer — it does not change the existing OpenAI `/v1/chat/completions`, `/v1/responses`, account rotation, session lifecycle, or Freebuff main call chain.
-
-## ⭐ Special Models: DeepSeek V4 Flash & MiMo 2.5
-
-When the Worker accesses Freebuff via Cloudflare Workers, the upstream typically identifies the request as originating from the US (full-access mode). In full-access mode, the official Desktop client classifies the following two models as **unlimited non-Premium** categories. Here, `unlimited` primarily refers to the model classification and concurrency category — **not an absolute guarantee of no limits across all accounts, regions, interfaces, or time periods**:
-
-| Model | Full-Access Mode Notes |
-|---|---|
-| `deepseek/deepseek-v4-flash` | Official non-Premium model; primary recommendation; no daily base limit detected by the Worker |
-| `mimo/mimo-v2.5` | Official non-Premium model; no daily base limit detected by the Worker |
-
-> ⚠️ In restricted mode, Freebuff officially limits these two models to 6 one-hour sessions per day. The Worker defaults to US egress, which typically avoids this restricted mode. Actual availability and quotas depend on the Freebuff upstream response — official rules may also change.
-
-Apart from these two special models, all regular models are understood to have a **base quota of 6 sessions per Pacific day** (resetting around 15:00 Beijing time). `referral`, `streak`, independent shared pools, and upstream temporary limits are additional conditions — they should not be used to advertise unlimited usage.
-
-> 💡 **About Quota**: Quota is deducted when a **session is created** (not per conversation turn). A session lasts ~1 hour, during which multiple conversation rounds do not consume additional quota. So 4 accounts × 6 sessions/day ≈ full-day coverage.
->
-> 📝 **Ad & Streak Notes**: Before creating a new session, the Worker requests ads (matching the official client flow) and calls `GET /api/v1/freebuff/streak` for check-in. Whether continuous usage grants extra quota, and how much, is determined by Freebuff's server — this flow is not a quota guarantee and does not change the session-based deduction rules.
-
-## 🚀 Quick Start
-
-1. Obtain a freebuff token (see "[Providing FREEBUFF_TOKEN](#-providing-freebuff_token)" below)
-2. Deploy the service (see "[Deployment](#-deployment)" below — **Docker container deployment recommended**)
-3. Configure environment variables:
-   - `FREEBUFF_TOKEN` (required) = your token
-   - `API_KEY` (optional) = custom API access key, defaults to `freebuff-default-key`
-4. Connect with any OpenAI client:
-   - **Base URL**: `http://localhost:8787/v1` (Docker) or `https://your-worker.your-subdomain.workers.dev/v1` (CF, not recommended)
-   - **API Key**: `<your API_KEY value>`
-
-> 🌐 **Custom Domain**: If `*.workers.dev` is inaccessible from your region (blocked/restricted), you can bind a custom domain to the Worker and use `https://your-domain/v1` as the Base URL. See "[Custom Domain](#-custom-domain)" below.
-
-## ❤️ Health Check
-
-After deployment, use (**no API key required**):
-
-```bash
-curl https://your-worker.workers.dev/health
-# {"status":"ok","version":"1.8.9","time":"..."}
+```
+                      ┌──────────────────────────────────────────────┐
+                      │ Clients (OpenAI SDK, Anthropic SDK, Web UIs) │
+                      └───────────────────────┬──────────────────────┘
+                                              │
+                    ┌─────────────────────────┴─────────────────────────┐
+                    ▼                                                   ▼
+        [Docker / Node.js Server]                             [Cloudflare Workers]
+                server.js                                           worker.js
+       (Zero-dependency HTTP Server)                             (Serverless Edge)
+       (SOCKS5 / HTTP Proxy Manager)                                    │
+                    │                                                   │
+                    └─────────────────────────┬─────────────────────────┘
+                                              ▼
+                                          worker.js
+                           ┌──────────────────────────────┐
+                           │   Router & Protocol Adapters │
+                           │  /v1/chat/completions        │
+                           │  /v1/responses               │
+                           │  /v1/messages                │
+                           └──────────────┬───────────────┘
+                                          ▼
+                                     executeChat()
+                           ┌──────────────────────────────┐
+                           │  1. Strategy Token Selector  │
+                           │  2. Session Cache (~1 hr)    │
+                           │  3. Agent Run Chain (START)  │
+                           │  4. Serial Queue (300ms gap) │
+                           │  5. Upstream Stream Pipeline │
+                           └──────────────┬───────────────┘
+                                          ▼
+                              Upstream (Codebuff / Relay)
 ```
 
-- The `version` field shows the current deployed version — **it changes with every deployment**, useful for verifying whether the latest update is live (CF edge cache has a delay; wait a few seconds or add a random parameter when checking)
-- Suitable for UptimeRobot / self-hosted monitoring
+---
 
-For authenticated account details, use `GET /v1/accounts` (or `/accounts`). It reports masked tokens, access tiers, pool/rate-limit metadata, local cooldown state, and observation recency; full tokens are never returned. This endpoint is **cache-only** — it never queries the upstream. Account health is observed passively from real chat traffic, so a fresh account with no chat history will show `status: "unknown"` until it handles its first request.
+## Quick Start
 
-## 🔑 Obtaining FREEBUFF_TOKEN
+### Option 1: Docker (Recommended)
 
-> The freebuff auth token is normally obtained via the official client's **authorization code polling** flow (generate a device fingerprint → `POST /api/auth/cli/code` for a login URL → authorize in the browser → poll `/api/auth/cli/status` to receive the user object with its `authToken`). Bring your own token from the client, an external extractor, or any workflow you maintain yourself.
+Docker deployment provides the highest stability, full egress proxy support (SOCKS5/HTTP), and credential directory mounting.
 
-### Where the token goes
-
-| Deployment | How to provide the token |
-|---|---|
-| Docker / Node (`server.js`) | Place `.json` or `.jsonl` files in `credentials/` (e.g. `credentials/accounts.jsonl` or `credentials/acc1.json`). Each entry's `authToken` / `token` and optional `user.id` / `uid` are automatically parsed. A raw `FREEBUFF_TOKEN` env var is also supported and merged in. |
-| Cloudflare Worker (not recommended) | Set `FREEBUFF_TOKEN` as a Worker Secret (comma-separated for multiple accounts). |
-
-> 💡 **Multiple accounts**: separate tokens with commas (`token1,token2`) or newlines, or for Docker, place JSON / JSONL files under `credentials/`. Flat-token separation is a plain line split on commas **and** newlines, so newline-separated values work too.
-
-## 🛠️ Deployment
-
-### 🐳 Docker Container Deployment (✅ Recommended)
-
-> Suitable for local/NAS/VPS long-running operation: not subject to Cloudflare Workers limits, **does not expose CF edge markers** (`cf-worker` / `cf-ray`), significantly lower account suspension risk compared to CF deployment. The same codebase can also run on CF (not recommended).
-
-**Quick Deploy:**
-
-```bash
-# 1. Prepare the directory — copy the following files: worker.js server.js package.json Dockerfile docker-compose.yml
-mkdir freebuff2api && cd freebuff2api
-
-# 2. Configure .env (API key + optional RELAY_URL)
-cat > .env <<'EOF'
-API_KEY=your-api-key
-RELAY_URL=
-EOF
-
-# 3. Account credentials: place JSON or JSONL files under credentials/
-mkdir -p credentials
-# Option A: Single accounts.jsonl containing multiple lines:
-# {"authToken": "...", "email": "...", "user": {"id": "..."}}
-# Option B: Individual JSON files (e.g. credentials/acc1.json):
-# {"email": "...", "authToken": "...", "name": "..."}
-
-# 4. Start
-chmod 600 .env credentials/*
-docker compose up -d --build
-```
-
-After startup, the service listens on `0.0.0.0:8787` (accessible at `http://localhost:8787/v1`).
-
-**Environment Variables:**
-
-| Variable | Description |
-|---|---|
-| `PORT` / `HOST` | Listen port/address, defaults to `8787` / `0.0.0.0` |
-| `API_KEY` | API access key (defaults to `freebuff-default-key`). Also accepts `API_KEY` as a fallback alias. Clients authenticate via `Authorization: Bearer <key>` **or** `x-api-key: <key>` header. |
-| `FREEBUFF_DEBUG` | Set to `true` to enable per-request debug logging |
-| `CODEBUFF_API` | Upstream address; empty = direct to `https://www.codebuff.com`; set to a relay domain when using a self-hosted relay |
-| `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all traffic through relay |
-| `PROXIES_FILE` | Path to rotating proxies list file (default: `proxies.txt`) |
-| `PROXY_URL` | Upstream rotating proxy URL(s), comma/newline separated |
-
-> ⚠️ Inside the container, `credentials/` and `proxies.txt` are mounted as read-only. `server.js` reads and assembles `FREEBUFF_TOKEN` and proxy rotation at startup.
-
-### Cloudflare Worker Deployment (❌ Not Recommended)
-
-> **Freebuff has been actively detecting Cloudflare Worker deployments** (identifying `cf-worker` / `cf-ray` edge markers — the source code explicitly names proxy patterns similar to this project). Deploying on CF significantly increases the risk of account suspension. **Not recommended as a primary deployment method.** The steps below are provided for users who understand the risks.
-
-The worker is a **single file** (`worker.js`). If you still choose to deploy on CF:
-
-### Method A: CF Dashboard Paste
-
-The simplest and most controllable approach — no local environment needed, no GitHub integration:
-
-1. Open [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages** → **Create** → **Create Worker**
-2. Choose any name (e.g., `freebuff2api`), click **Deploy**
-3. Go to the Worker → **Edit code** → paste the **entire content** of [worker.js](worker.js), overwriting the default code → **Deploy**
-4. Click **Settings → Variables and Secrets → Add**:
-
-   | Type | Name | Value |
-   |---|---|---|
-   | Secret | `FREEBUFF_TOKEN` | Your freebuff token (comma-separated for multiple accounts) |
-   | Secret | `API_KEY` | Custom API access key (optional, defaults to `freebuff-default-key`) |
-
-5. Verify after deployment:
-
+1. **Clone the repository:**
    ```bash
-   curl https://your-worker.workers.dev/health          # Health check (no key required)
-   curl https://your-worker.workers.dev/v1/models \
-     -H "Authorization: Bearer ***"           # Model list
+   git clone https://github.com/fdjrr/freebuff2api.git
+   cd freebuff2api
    ```
 
-> Each time you modify the code, repeat step 3: edit code → paste new content → deploy. **Linking to GitHub for auto-deployment is not recommended** (see below).
-> ⚠️ **Version Convention**: The single source of truth is `VERSION` at the top of [worker.js](worker.js) — it drives the health `version` field and the `X-Freebuff2api-Version` response header. Before each deployment, bump `VERSION` in `worker.js` (and optionally the image tag in `docker-compose.yml` / `package.json`) so you can confirm whether the update is live. The README examples below show the version current at the time of writing.
+2. **Configure environment:**
+   ```bash
+   cp .env.example .env
+   ```
+   Edit `.env` and set your preferred settings:
+   ```ini
+   API_KEY=your-custom-api-key
+   FREEBUFF_TOKEN=token1,token2
+   ACCOUNT_SELECTION_STRATEGY=sticky
+   ```
 
-### GitHub Auto-Deployment (❌ Not Recommended)
+   *(Optional)* You can also mount credential files directly into `credentials/` as `.json` or `.jsonl` (e.g. `credentials/accounts.jsonl` containing `{"authToken": "...", "email": "..."}`).
 
-While CF supports connecting a GitHub repository for auto-deployment, **it's not advised**:
+3. **Start container:**
+   ```bash
+   docker compose up -d --build
+   ```
+   The service will listen on `http://localhost:8787` (or your configured `PORT`).
 
-- Every push triggers a deployment — locally unverified changes could hit production directly
-- Additional configuration for build commands / root directory is needed
-- Secrets and branch states can easily become inconsistent, making troubleshooting difficult
-- Auto-deploying every push would ship tokens configured in CI and make the exposure surface harder to control
+---
 
-**Recommended approach**: Modify code locally → deploy via Docker / self-hosted VPS, or (if you understand the risks) manually paste into the CF dashboard → deploy yourself — full control.
+### Option 2: Local Node.js
 
-> Free models require US egress IPs. Cloudflare Workers default to US egress, so no additional configuration is needed.
-
-### 🌐 Custom Domain
-
-The default domain `https://your-worker.your-subdomain.workers.dev` may be inaccessible from some regions (e.g., blocked by GFW). If you experience `workers.dev` connection timeouts or unreachability, you can bind a custom domain to the Worker:
-
-1. **Add Custom Domain**: CF Dashboard → Your Worker → **Settings → Domains & Routes** → **Add** → **Custom domain**
-2. Enter your domain (e.g., `api.your-domain.com`). CF will automatically guide you to add a DNS record (CNAME pointing to `your-worker.your-subdomain.workers.dev`)
-3. Wait for DNS to propagate (a few minutes). A free SSL certificate is issued automatically
-4. Then use Base URL: `https://api.your-domain.com/v1`
-
-> Requirement: The domain must be hosted on Cloudflare (or DNS transferred to CF). No configuration is needed for the `workers.dev` subdomain; binding a custom domain simply provides an alternative access path for regions where the default is blocked.
-
-## 💬 Usage Examples
+Requires Node.js >= 20 (no `npm install` needed, pure standard library):
 
 ```bash
-# Health check
-curl https://your-worker.workers.dev/health
+# Set environment variables
+export API_KEY="your-custom-api-key"
+export FREEBUFF_TOKEN="your_token_here"
+export PORT=8787
 
-# Model list
-curl https://your-worker.workers.dev/v1/models \
-  -H "Authorization: Bearer <API_KEY>"
-
-# Non-streaming
-curl https://your-worker.workers.dev/v1/chat/completions \
-  -H "Authorization: Bearer <API_KEY>" -H "Content-Type: application/json" \
-  -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"Hello"}]}'
-
-# Streaming
-curl -N https://your-worker.workers.dev/v1/chat/completions \
-  -H "Authorization: Bearer <API_KEY>" -H "Content-Type: application/json" \
-  -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+# Start server
+node server.js
 ```
 
-## 📋 Model List
+---
 
-> Source mapping: Freebuff Desktop 0.0.51 (`orchestrator.js` official `FREEBUFF_ROOT_AGENT_ID_BY_MODEL`, synced as of 2026-08-07).
-> The Worker accesses the upstream via Cloudflare Workers, defaulting to US egress under Freebuff's full-access mode. Aside from Flash and MiMo (the two official non-Premium models), the remaining models are understood to have a **base quota of 6 sessions per Pacific day** (resetting around 15:00 Beijing time). Quota is deducted when a **session is created**; one session lasts ~1 hour.
+### Option 3: Cloudflare Workers
 
-### ⭐ Full-Access Mode Special Models: Non-Premium
+Deploy the single-file worker directly to Cloudflare's serverless edge:
 
-In full-access mode, the official Desktop client classifies these two models under the `unlimited` non-Premium category. Here, `unlimited` primarily refers to the official model classification and Desktop concurrency category — **not an absolute guarantee of unlimited usage across any account, interface, or time period**. The Worker's current probing also does not detect daily base limits for them in `rateLimitsByModel`.
+1. In Cloudflare Dashboard, go to **Workers & Pages** -> **Create Worker**.
+2. Copy the entire contents of [`worker.js`](worker.js) into the code editor.
+3. Configure the following environment variables / secrets (**Settings** -> **Variables and Secrets**):
+   - `FREEBUFF_TOKEN`: Your comma-separated Freebuff tokens.
+   - `API_KEY`: Custom client authentication key (default: `freebuff-default-key`).
+   - `ACCOUNT_SELECTION_STRATEGY`: `sticky` *(default)*, `round_robin_active`, or `pure_round_robin`.
+4. Deploy the worker.
 
-| API Model Name | Session Model | Upstream agentId | Notes |
-|---|---|---|---|
-| `deepseek/deepseek-v4-flash` | Same | `base2-free-deepseek-flash` | Full-access mode special model; primary recommendation |
-| `mimo/mimo-v2.5` | Same | `base2-free-mimo` | Full-access mode special model; balanced performance |
+---
 
-> ⚠️ In restricted mode, Freebuff officially limits these two models to 6 one-hour sessions per day. The Worker defaults to US egress, which typically avoids this restricted mode. Actual availability and quotas depend on the Freebuff upstream response.
+## Configuration Reference
 
-### 🔒 Standard Models: 6 Base Sessions Per Day
-
-The following models do not have "unlimited" claims — they are uniformly treated as having a base quota of 6 sessions per day. Actual quotas may vary by account, official `referral` / `streak`, channel status, or upstream rule changes.
-
-| API Model Name | Session Model | Upstream agentId |
+| Environment Variable | Default | Description |
 |---|---|---|
-| `minimax/minimax-m3` | Same | `base2-free-minimax-m3` |
-| `deepseek/deepseek-v4-pro` | Same | `base2-free-deepseek` |
-| `openai/gpt-5.6-luna` | Same | `base2-free-luna` |
-| `poolside/laguna-s-2.1` | Same | `base2-free-laguna-s-2-1` |
-| `openrouter/poolside/laguna-s-2.1` | Same | `base2-free-laguna-s-2-1-openrouter` |
-| `inclusionai/ling-3.0-flash:free` | Same | `base2-free-ling-3-flash` |
-| `crof/greg-2-ultra` | Same | `base2-free-greg-2-ultra` |
-| `crof/greg-2-super` | Same | `base2-free-greg-2-super` |
-| `meta/muse-spark-1.2-contributor` | Same | `base2-free-muse-spark` |
+| `API_KEY` | `freebuff-default-key` | Secret key required by clients (`Authorization: Bearer <key>` or `x-api-key`). |
+| `FREEBUFF_TOKEN` | *(empty)* | Upstream authentication tokens (comma-separated or newline-separated). |
+| `ACCOUNT_SELECTION_STRATEGY` | `sticky` | Account routing strategy: `sticky`, `round_robin_active`, or `pure_round_robin`. |
+| `PORT` | `8787` | HTTP port for the Node.js server / Docker container. |
+| `HOST` | `0.0.0.0` | Bind host address. |
+| `FREEBUFF_DEBUG` | `false` | Enable detailed console logging for requests and upstream events. |
+| `CODEBUFF_API` | `https://www.codebuff.com` | Override upstream endpoint URL. |
+| `RELAY_URL` | *(empty)* | URL of a relay worker (e.g. `cloudflare-relay.js`) to route requests through. |
+| `PROXIES_FILE` | `proxies.txt` | Path to rotating proxy list file. |
+| `PROXY_URL` | *(empty)* | Upstream egress proxy URL (`http://`, `socks5://`, or raw `host:port:user:pass`). |
 
-### 🎁 Independent Eligibility or Capacity-Limited
+---
 
-The following models are not part of the standard open pool. Whether a session can be created depends on official eligibility, shared capacity, or upstream status. Even if eligible, this does not imply unlimited usage:
+## Account Selection Strategies
 
-| API Model Name | Session Model | Upstream agentId | Limits |
-|---|---|---|---|
-| `z-ai/glm-5.2` | Same | `base2-free-glm` | Requires referral / streak or other official eligibility; uses independent quota pool |
-| `anthropic/claude-fable-5` | Same | `base2-free-fable` | Official capacity-limited trial; may be available during certain periods |
+Freebuff enforces session-based quota allocation (sessions last ~1 hour, and daily quotas are consumed on session creation). To accommodate different operational patterns, `freebuff2api` supports three selection strategies:
 
-> 📝 Empirical notes (2026-08-08): `ling-3.0-flash:free` may return 404 from the upstream with a suggestion to use the paid slug. `claude-fable-5` may reject session creation for free accounts (`session_model_mismatch`). These are upstream availability issues, not Worker mapping problems.
+| Strategy | Description | Best For |
+|---|---|---|
+| **`sticky`** *(default)* | Keeps using an account with an active session until it expires or hits a rate limit, then moves to the next. | **Maximizing daily session quota** (recommended for low-to-medium multi-account pools). |
+| **`round_robin_active`** | Round-robins requests across all accounts that already have an active session cached. Falls back to round-robin among idle accounts when no session exists. | **Load balancing traffic** across multiple accounts without prematurely consuming new daily session slots. |
+| **`pure_round_robin`** | Strict round-robin across all available accounts on every incoming request, completely bypassing the session cache. | High concurrency scenarios where session churn is acceptable. |
 
-## 👥 Multi-Account
+---
 
-Separate multiple tokens with commas in `FREEBUFF_TOKEN` (`token1,token2`). When quota is exhausted (429 / empty response), the current account is automatically cooled down and the next one is used.
+## Available Models
 
-**Account Selection Strategy** (since v1.4.0):
+The model catalog is dynamically synchronized against official Freebuff sources and categorized into quota pools:
 
-1. Priority is given to accounts with **an active session cache** — a session lasts ~1 hour; quota is deducted only when created, not when reused
-2. If no active cache exists, the next account is used in round-robin fashion
+### 1. Standard Models (High Capacity)
+- `deepseek/deepseek-v4-flash` *(Recommended default)*
+- `mimo/mimo-v2.5`
 
-This way, 4 accounts × 6 sessions/day ≈ full-day coverage, maximizing quota utilization.
+### 2. Premium Models (Shared Quota Pool)
+- `deepseek/deepseek-v4-pro`
+- `minimax/minimax-m3`
+- `openai/gpt-5.6-luna`
+- `poolside/laguna-s-2.1`
+- `openrouter/poolside/laguna-s-2.1`
+- `meta/muse-spark-1.2-contributor`
+- `crof/greg-2-ultra`
+- `crof/greg-2-super`
 
-> Note: Cooldown state is stored in Worker memory and resets on cold start. It is not shared across concurrent instances. This has minimal impact on daily use.
+### 3. Independent & Special Models
+- `z-ai/glm-5.2` (Referral / unlocked quota)
+- `anthropic/claude-fable-5` (Capacity-limited trial)
 
-## 🔍 Upstream Gating Details
+> Note: Check `/v1/models` on your deployed instance to view the live, dynamically resolved model catalog.
 
-Freebuff's free models are not simply "get a token and call chat" — they have a strict lifecycle:
+---
 
+## API Usage Examples
+
+### 1. Health Check
+```bash
+curl http://localhost:8787/health
 ```
-session(create) → agent-runs(main + context-pruner sub-run) → chat/completions
+```json
+{
+  "status": "ok",
+  "version": "1.8.9",
+  "strategy": "sticky",
+  "accounts": 3,
+  "alive_accounts": 3,
+  "time": "2026-09-04T10:00:00.000Z"
+}
 ```
 
-- **session**: `POST /api/v1/freebuff/session` (with `x-freebuff-model`) returns `instanceId`; may queue (queued).
-- **agent-runs**: `START` the main agent (e.g., `base2-free-deepseek-flash`) + `context-pruner` sub-run, then `record_step` / `finish_run`. The chat endpoint validates `run_id` existence — missing it returns 4xx.
-- **chat**: `POST /api/v1/chat/completions` with `codebuff_metadata.run_id`, `x-freebuff-instance-id`, SDK UA, `stop:['"cb_easp"']`, `provider.data_collection=deny`. **Upstream forces streaming** — non-streaming requests are aggregated (timeout has been relaxed to 45s).
+### 2. OpenAI Chat Completions (`/v1/chat/completions`)
 
-The Worker handles all of the above lifecycle automatically — no manual intervention needed. Additionally, system messages must start with `You are Buffy, the strategic coding assistant.` (byte-level upstream validation) — the Worker auto-injects this.
+**Streaming:**
+```bash
+curl -N http://localhost:8787/v1/chat/completions \
+  -H "Authorization: Bearer freebuff-default-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek/deepseek-v4-flash",
+    "messages": [
+      {"role": "user", "content": "Explain quantum entanglement in simple terms."}
+    ],
+    "stream": true
+  }'
+```
 
-### ⚠️ Single-Account Single-Session Limit (Important)
+**Non-Streaming:**
+```bash
+curl http://localhost:8787/v1/chat/completions \
+  -H "Authorization: Bearer freebuff-default-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek/deepseek-v4-flash",
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ]
+  }'
+```
 
-One Freebuff account can only have **one client online at a time**. Therefore:
+---
 
-- ❌ Do NOT query the upstream `GET /api/v1/freebuff/session` in `/v1/models` to probe quota/status — this call would occupy a session and disrupt any ongoing chat (428 `waiting_room_required`).
-- ✅ `/v1/models` returns a **static model list** (no additional upstream calls).
-- Upstream requests are executed via a **serial queue with a 300ms interval** to avoid triggering upstream concurrency issues.
+### 3. Anthropic Messages API (`/v1/messages`)
 
-## 💡 Usage Experience
+```bash
+curl http://localhost:8787/v1/messages \
+  -H "x-api-key: freebuff-default-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek/deepseek-v4-flash",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "Write a quicksort function in JavaScript."}
+    ]
+  }'
+```
 
-The following setups have been tested and work well:
+---
 
-1. **🌍 US IP Direct Connection**: Freebuff's free models require US egress IPs; non-US IPs may fail. Cloudflare Workers default to US egress, so direct connection works. Local clients should use a US proxy.
+### 4. OpenAI Responses API (`/v1/responses`)
 
-2. **🤖 Hermes Agent (US VPS)**: Deploy Hermes Agent on a US-based VPS.
+```bash
+curl http://localhost:8787/v1/responses \
+  -H "Authorization: Bearer freebuff-default-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek/deepseek-v4-flash",
+    "input": "Summarize the benefits of clean architecture.",
+    "stream": false
+  }'
+```
 
-3. **Local Browser + page-assist Plugin**: Works smoothly with the [page-assist](https://github.com/n4ze3m/page-assist) browser extension — feel free to try it out.
+---
 
-## 🙏 Acknowledgments
+## Security & Best Practices
 
-Special thanks to the following contributors for their support (in no particular order):
+- **Token Security**: Never commit `credentials/`, `.env`, or raw tokens into version control. Ensure proper file permissions (`chmod 600 .env credentials/*`).
+- **Network Egress**: Freebuff models typically require US egress IP addresses. If hosting outside the US, utilize the built-in `PROXY_URL` (SOCKS5/HTTP) or deploy the lightweight `cloudflare-relay.js` to route outbound calls cleanly.
+- **Single-Account Concurrency**: Each Freebuff account allows one active session at a time. The proxy queues requests per account with an intentional serial delay to prevent concurrent collisions and session evictions.
 
-- [@yjzsg](https://github.com/yjzsg)
-- [@zipei-a](https://github.com/zipei-a)
-- [@hknerdr](https://github.com/hknerdr)
+---
 
-## ⚠️ Disclaimer
+## License
 
-This project is intended for **technical exchange and learning/research purposes only**.
-
-- This project operates by reverse-engineering the freebuff desktop app / API protocol — **it violates Freebuff's Terms of Service**.
-- Use of this project carries a **risk of account suspension (banned)**, which is permanent and irreversible. Please be aware and assume all consequences.
-- Do not use for commercial purposes or large-scale abuse. Respect Freebuff's service operations.
-- Users must comply with all applicable local laws and Freebuff's official terms. The project authors are not responsible for any account loss or disputes.
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE). Feel free to use, modify, and share.
+This project is open-source software licensed under the [MIT License](LICENSE).
