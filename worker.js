@@ -385,6 +385,7 @@ export default {
       return jsonResponse({
         status: "ok",
         version: VERSION,
+        strategy: (env.ACCOUNT_SELECTION_STRATEGY || "sticky").toLowerCase().trim(),
         ...summarizeAccountHealth(parseAccounts(env), acctHealth),
         health_source: "worker_cache",
         time: new Date().toISOString(),
@@ -428,6 +429,7 @@ export default {
 // ---------------------------------------------------------------------------
 
 let accountIdx = 0;
+let activeAccountIdx = 0;
 const cooldowns = new Map();      // token -> cooldown expiry ms
 const sessCache = new Map();      // `${token}`:${sessionModel}` -> { instanceId, model, remainingMs, expiresAt } (token-prefixed to prevent cross-account mixing)
 const runCache = new Map();       // `${token}:${agentId}` -> { runId, childRunId, ts }
@@ -585,11 +587,43 @@ function pickToken(env, sessionModel) {
   // only triggers cooldown skip after receiving explicit rate limits. This prevents stale snapshots from
   // hijacking the round-robin or reordering accounts by "most remaining quota first".
   const finalPool = alivePool;
+  const strategy = (env.ACCOUNT_SELECTION_STRATEGY || "sticky").toLowerCase().trim();
 
+  // Strategy 1: "pure_round_robin"
+  // Completely ignores active session cache, always round-robins across available accounts.
+  if (strategy === "pure_round_robin") {
+    for (let k = 0; k < finalPool.length; k++) {
+      const acct = finalPool[accountIdx % finalPool.length];
+      accountIdx = (accountIdx + 1) % finalPool.length;
+      const t = acct.token;
+      if (!cooldowns.has(t) || cooldowns.get(t) <= Date.now()) return acct;
+    }
+    return null;
+  }
+
+  // Strategy 2: "round_robin_active"
+  // If multiple accounts have an active session for this model, round-robin among them.
+  // If none have an active session, falls back to round-robin among all available accounts.
+  if (strategy === "round_robin_active" && sessionModel) {
+    const activeAccounts = finalPool.filter((acct) => {
+      const t = acct.token;
+      if (cooldowns.has(t) && cooldowns.get(t) > Date.now()) return false;
+      const cached = sessCache.get(t + ":" + sessionModel);
+      return isUsableSession(cached);
+    });
+
+    if (activeAccounts.length > 0) {
+      const acct = activeAccounts[activeAccountIdx % activeAccounts.length];
+      activeAccountIdx = (activeAccountIdx + 1) % activeAccounts.length;
+      return acct;
+    }
+  }
+
+  // Strategy 3 (Default): "sticky"
   // Prefer accounts with active session caches: a session lasts ~1 hour, quota is deducted only on session creation
   // Free quota (e.g., v4-pro 6/day). Pure round-robin would switch accounts and create a session per request,
   // wasting session creation quota. Stick to the same account while the session cache is active; switch only when exhausted.
-  if (sessionModel) {
+  if (strategy === "sticky" && sessionModel) {
     for (const acct of finalPool) {
       const t = acct.token;
       if (cooldowns.has(t) && cooldowns.get(t) > Date.now()) continue;
@@ -600,7 +634,7 @@ function pickToken(env, sessionModel) {
     }
   }
 
-  // Only round-robin when no active cache exists (skip cooldown accounts); never force-clear a cooldown
+  // Fallback: round-robin across all available accounts when no active cache matches
   for (let k = 0; k < finalPool.length; k++) {
     const acct = finalPool[accountIdx % finalPool.length];
     accountIdx = (accountIdx + 1) % finalPool.length;
