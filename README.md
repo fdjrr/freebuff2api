@@ -63,10 +63,10 @@ Apart from these two special models, all regular models are understood to have a
 2. Deploy the service (see "[Deployment](#-deployment)" below — **Docker container deployment recommended**)
 3. Configure environment variables:
    - `FREEBUFF_TOKEN` (required) = your token
-   - `FREEBUFF_API_KEY` (optional) = custom API access key, defaults to `freebuff-default-key`
+   - `API_KEY` (optional) = custom API access key, defaults to `freebuff-default-key`
 4. Connect with any OpenAI client:
    - **Base URL**: `http://localhost:8787/v1` (Docker) or `https://your-worker.your-subdomain.workers.dev/v1` (CF, not recommended)
-   - **API Key**: `<your FREEBUFF_API_KEY value>`
+   - **API Key**: `<your API_KEY value>`
 
 > 🌐 **Custom Domain**: If `*.workers.dev` is inaccessible from your region (blocked/restricted), you can bind a custom domain to the Worker and use `https://your-domain/v1` as the Base URL. See "[Custom Domain](#-custom-domain)" below.
 
@@ -111,7 +111,7 @@ mkdir freebuff2api && cd freebuff2api
 
 # 2. Configure .env (API key + optional RELAY_URL)
 cat > .env <<'EOF'
-FREEBUFF_API_KEY=your-api-key
+API_KEY=your-api-key
 RELAY_URL=
 EOF
 
@@ -134,7 +134,7 @@ After startup, the service listens on `0.0.0.0:8787` (accessible at `http://loca
 | Variable | Description |
 |---|---|
 | `PORT` / `HOST` | Listen port/address, defaults to `8787` / `0.0.0.0` |
-| `FREEBUFF_API_KEY` | API access key (defaults to `freebuff-default-key`). Also accepts `API_KEY` as a fallback alias. Clients authenticate via `Authorization: Bearer <key>` **or** `x-api-key: <key>` header. |
+| `API_KEY` | API access key (defaults to `freebuff-default-key`). Also accepts `API_KEY` as a fallback alias. Clients authenticate via `Authorization: Bearer <key>` **or** `x-api-key: <key>` header. |
 | `FREEBUFF_DEBUG` | Set to `true` to enable per-request debug logging |
 | `CODEBUFF_API` | Upstream address; empty = direct to `https://www.codebuff.com`; set to a relay domain when using a self-hosted relay |
 | `RELAY_URL` | Relay worker URL (e.g. `https://cloudflare-relay.freebuff.workers.dev/`) — routes all traffic through relay |
@@ -161,7 +161,7 @@ The simplest and most controllable approach — no local environment needed, no 
    | Type | Name | Value |
    |---|---|---|
    | Secret | `FREEBUFF_TOKEN` | Your freebuff token (comma-separated for multiple accounts) |
-   | Secret | `FREEBUFF_API_KEY` | Custom API access key (optional, defaults to `freebuff-default-key`) |
+   | Secret | `API_KEY` | Custom API access key (optional, defaults to `freebuff-default-key`) |
 
 5. Verify after deployment:
 

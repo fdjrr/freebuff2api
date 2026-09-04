@@ -517,14 +517,14 @@ if (envToken) {
 
 const env = {
   FREEBUFF_TOKEN: tokenLines.join(','),
-  FREEBUFF_API_KEY: process.env.FREEBUFF_API_KEY || 'freebuff-default-key',
+  API_KEY: process.env.API_KEY || 'freebuff-default-key',
   FREEBUFF_DEBUG: process.env.FREEBUFF_DEBUG || 'false',
   CODEBUFF_API: process.env.CODEBUFF_API || '',
   RELAY_URL: process.env.RELAY_URL || '',
   PROXY_URL: proxyList.length > 0 ? proxyList[0].href : '',
 };
 
-console.log(`[server] start: ${tokenLines.length} tokens, apiKey=${env.FREEBUFF_API_KEY.slice(0,8)}..., debug=${env.FREEBUFF_DEBUG}`);
+console.log(`[server] start: ${tokenLines.length} tokens, apiKey=${env.API_KEY.slice(0,8)}..., debug=${env.FREEBUFF_DEBUG}`);
 if (env.CODEBUFF_API) console.log(`[server] CODEBUFF_API=${env.CODEBUFF_API}`);
 if (env.RELAY_URL) console.log(`[server] RELAY_URL=${env.RELAY_URL}`);
 

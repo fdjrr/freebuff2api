@@ -2434,7 +2434,7 @@ async function handleModels() {
 }
 
 function getApiKey(request, env) {
-  const expected = (env.API_KEY || env.FREEBUFF_API_KEY || DEFAULT_API_KEY).trim();
+  const expected = (env.API_KEY || env.API_KEY || DEFAULT_API_KEY).trim();
   if (!expected) return null;
   const auth = request.headers.get("Authorization") || "";
   if (auth.startsWith("Bearer ")) return auth.slice(7) === expected ? expected : null;
