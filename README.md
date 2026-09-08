@@ -123,15 +123,60 @@ node server.js
 
 ### Option 3: Cloudflare Workers
 
+#### A. Single Worker Deployment
 Deploy the single-file worker directly to Cloudflare's serverless edge:
 
-1. In Cloudflare Dashboard, go to **Workers & Pages** -> **Create Worker**.
-2. Copy the entire contents of [`worker.js`](worker.js) into the code editor.
-3. Configure the following environment variables / secrets (**Settings** -> **Variables and Secrets**):
-   - `FREEBUFF_TOKEN`: Your comma-separated Freebuff tokens.
-   - `API_KEY`: Custom client authentication key (default: `freebuff-default-key`).
-   - `ACCOUNT_SELECTION_STRATEGY`: `sticky` *(default)*, `round_robin_active`, or `pure_round_robin`.
-4. Deploy the worker.
+1. **Using Wrangler CLI:**
+   ```bash
+   npx wrangler deploy
+   ```
+2. **Or via Cloudflare Dashboard:**
+   - In Cloudflare Dashboard, go to **Workers & Pages** -> **Create Worker**.
+   - Copy the entire contents of [`worker.js`](worker.js) into the code editor.
+   - Configure the following environment variables / secrets (**Settings** -> **Variables and Secrets**):
+     - `FREEBUFF_TOKEN`: Your comma-separated Freebuff tokens.
+     - `API_KEY`: Custom client authentication key (default: `freebuff-default-key`).
+     - `ACCOUNT_SELECTION_STRATEGY`: `sticky` *(default)*, `round_robin_active`, or `pure_round_robin`.
+   - Deploy the worker.
+
+#### B. Multi-Worker Automated Sharding & 9router Sync (`scripts/deploy-workers.sh`)
+To maximize concurrency and isolate quota pools, you can distribute accounts across multiple named worker instances (e.g., `freebuff2api1`, `freebuff2api2`, ...).
+
+All configuration is centralized in **`.env`** (refer to [`.env.example`](.env.example)):
+```ini
+TOTAL_WORKERS=15
+ACCOUNTS_PER_WORKER=auto
+WORKER_PREFIX=freebuff2api
+WORKERS_DOMAIN=fadjrir-co-id.workers.dev
+API_KEY=sk-xxx
+SYNC_9ROUTER=true
+ROUTER_URL=http://:127.0.0.1:20128
+ROUTER_PASSWORD=123456
+```
+
+The script automatically partitions accounts using **Balanced Remainder Allocation**:
+- **75 accounts across 15 workers** = exactly 5 accounts per worker.
+- **25 accounts across 10 workers** = 5 workers get 3 accounts, remaining 5 get 2 accounts (100% token utilization, zero waste).
+
+It also includes built-in **[9router](9ROUTER.md)** synchronization:
+1. Automatically logs into 9router via `ROUTER_PASSWORD`.
+2. Registers Provider Nodes (`Freebuff1`, `Freebuff2`, ...).
+3. Adds and validates client `API_KEY` connections.
+4. Fetches and registers all discovered models under each prefix (`fb1`, `fb2`, ...).
+
+```bash
+# 1. Preview distribution and dry-run (Cloudflare + 9router simulation)
+./scripts/deploy-workers.sh --dry-run
+
+# 2. Deploy workers and auto-sync to 9router
+./scripts/deploy-workers.sh
+
+# 3. Sync existing workers to 9router only (without redeploying to Cloudflare)
+./scripts/deploy-workers.sh --sync-only
+
+# 4. Deploy to Cloudflare only (skip 9router sync)
+./scripts/deploy-workers.sh --no-sync-9router
+```
 
 ---
 
