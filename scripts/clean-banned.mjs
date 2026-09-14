@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // clean-banned.mjs — probe every credential/*.json and credential/*.jsonl token against
 // the upstream session endpoint and clean accounts that are permanently dead (banned / invalid token).
 // Read-only for healthy accounts: it never deletes a file/entry unless the upstream itself
